@@ -38,6 +38,7 @@ class Settings(BaseSettings):
 
     # Webhook
     webhook_secret: SecretStr = SecretStr("")
+    webhook_port: int = 8000
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

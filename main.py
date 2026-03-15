@@ -549,7 +549,7 @@ async def main() -> None:
     config = uvicorn.Config(
         fastapi_app,
         host="0.0.0.0",
-        port=8000,
+        port=orchestrator._settings.webhook_port,
         log_level="info",
     )
     server = uvicorn.Server(config)
