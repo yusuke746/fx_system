@@ -647,11 +647,19 @@ async def main() -> None:
     server = uvicorn.Server(config)
 
     # 並行実行: Webhook サーバー + Orchestrator
-    await asyncio.gather(
-        server.serve(),
-        orchestrator.start(),
-    )
+    try:
+        await asyncio.gather(
+            server.serve(),
+            orchestrator.start(),
+        )
+    except asyncio.CancelledError:
+        logger.info("Shutdown requested (task cancelled)")
+    finally:
+        await orchestrator.stop()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nStopped by user (Ctrl+C)")
