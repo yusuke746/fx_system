@@ -10,9 +10,6 @@
     - Discord にポジションサマリー送信
 
   毎週日曜 23:00 JST:
-    - LightGBM 再学習（直近90日）
-    - ウォークフォワード検証
-    - PSI ドリフト検知
     - signals アーカイブ移動
     - VACUUM ANALYZE
     - api_call_log 週次集計
@@ -41,6 +38,7 @@ from loguru import logger
 from core.database import check_integrity
 from core.notifier import DiscordNotifier
 from core.time_manager import now_utc, format_jst
+from ml.retraining import run_weekly_retraining
 
 
 async def daily_maintenance(
@@ -95,6 +93,9 @@ async def weekly_maintenance(
     logger.info("=== Weekly maintenance started ===")
     now = now_utc()
 
+    # 0. LightGBM 再学習（未ラベル→ラベル付け→再学習）
+    retrain_result = run_weekly_retraining(db_conn)
+
     # 1. signals アーカイブ移動（30日以前）
     cutoff = (now - timedelta(days=30)).isoformat()
     db_conn.execute("DELETE FROM signals WHERE signal_time < ?", (cutoff,))
@@ -135,7 +136,9 @@ async def weekly_maintenance(
         f"勝率: {winrate:.1f}%\n"
         f"平均P&L: {trades_row['avg_pips']:.1f} pips\n"
         f"合計P&L: ¥{trades_row['total_pnl']:,.0f}\n"
-        f"GPT API呼び出し: {row['cnt']}回 / ${row['total_cost']:.2f}"
+        f"GPT API呼び出し: {row['cnt']}回 / ${row['total_cost']:.2f}\n"
+        f"再学習: labeled={retrain_result['labeling']['labeled']} / "
+        f"trained={len(retrain_result['retrain']['trained_pairs'])}"
     )
 
     await notifier.send(report)

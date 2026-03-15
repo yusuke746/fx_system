@@ -5,7 +5,7 @@ FX自動売買システム v2.2 — メインオーケストレーター
   ① TradingView Webhook受信（MTF SMC + テクニカル条件成立時のみ）
   ② Calendar Veto確認（Python IFルール・0ms）
   ③ GPT-5.2キャッシュ読込（メモリから即時・0ms）
-  ④ LightGBM推論（32特徴量・1ms以下）
+    ④ LightGBM推論（36特徴量・1ms以下）
   ⑤ ドテン判定 → インターバル確認
   ⑥ 高速連続発注 / MT5 ThreadPoolExecutor(max_workers=1)
 
@@ -38,6 +38,7 @@ from core.database import (
     insert_trade,
     close_trade,
     get_daily_pnl,
+    insert_training_sample,
 )
 from core.logger import setup_logger
 from core.notifier import DiscordNotifier, AlertLevel
@@ -50,7 +51,7 @@ from core.risk_manager import (
     check_exposure,
     check_daily_drawdown,
 )
-from core.time_manager import now_utc, format_jst, is_excluded_hours
+from core.time_manager import now_utc, format_jst, is_excluded_hours, to_jst
 from broker.mt5_broker import MT5Broker
 from llm.llm_client import DiffDetector, LLMClient
 from ml.lgbm_model import LGBMPredictor, build_features
@@ -282,10 +283,64 @@ class Orchestrator:
 
         # ④ LightGBM推論
         # Webhook JSONに全テクニカル指標が含まれるため market_data として共用
-        market_data = {**payload, "spread_pips": 1.5}
+        now = now_utc()
+        jst_now = to_jst(now)
+        market_data = {
+            **payload,
+            "atr_14": payload.get("atr", 0.0),
+            "spread_pips": 1.5,
+        }
         position_data = {
             "open_positions_count": len(self._position_manager.positions),
         }
+
+        # 学習用特徴量サンプル保存（未ラベル）
+        try:
+            insert_training_sample(self._db_conn, {
+                "pair": pair,
+                "signal_time": now,
+                "direction": direction,
+                "close_price": payload.get("close"),
+                "atr": payload.get("atr"),
+                "fvg_4h_zone_active": payload.get("fvg_4h_zone_active", False),
+                "ob_4h_zone_active": payload.get("ob_4h_zone_active", False),
+                "liq_sweep_1h": payload.get("liq_sweep_1h", False),
+                "liq_sweep_qualified": payload.get("liq_sweep_qualified", False),
+                "bos_1h": payload.get("bos_1h", False),
+                "choch_1h": payload.get("choch_1h", False),
+                "msb_15m_confirmed": payload.get("msb_15m_confirmed", False),
+                "mtf_confluence": payload.get("mtf_confluence", 0),
+                "atr_ratio": payload.get("atr_ratio", 1.0),
+                "bb_width": payload.get("bb_width", 0.0),
+                "close_vs_ema20_4h": payload.get("close_vs_ema20_4h", 0.0),
+                "close_vs_ema50_4h": payload.get("close_vs_ema50_4h", 0.0),
+                "high_low_range_15m": payload.get("high_low_range_15m", 0.0),
+                "macd_histogram": payload.get("macd_histogram", 0.0),
+                "macd_signal_cross": payload.get("macd_signal_cross", 0),
+                "rsi_14": payload.get("rsi_14", 50.0),
+                "rsi_zone": payload.get("rsi_zone", 0),
+                "stoch_k": payload.get("stoch_k", 50.0),
+                "stoch_d": payload.get("stoch_d", 50.0),
+                "momentum_3bar": payload.get("momentum_3bar", 0.0),
+                "ob_4h_distance_pips": payload.get("ob_4h_distance_pips", 0.0),
+                "fvg_4h_fill_ratio": payload.get("fvg_4h_fill_ratio", 0.0),
+                "liq_sweep_strength": payload.get("liq_sweep_strength", 0.0),
+                "prior_candle_body_ratio": payload.get("prior_candle_body_ratio", 0.5),
+                "consecutive_same_dir": payload.get("consecutive_same_dir", 0),
+                "pivot_proximity": payload.get("pivot_proximity", 0.0),
+                "sweep_pending_bars": payload.get("sweep_pending_bars", 0),
+                "spread_pips": 1.5,
+                "session_flag": 1,
+                "hour_of_day": jst_now.hour,
+                "day_of_week": now.weekday(),
+                "open_positions_count": len(self._position_manager.positions),
+                "max_dd_24h": 0.0,
+                "calendar_risk_score": 0,
+                "sentiment_score": sentiment_score,
+            })
+        except Exception as e:
+            logger.warning(f"Training sample insert failed: {e}")
+
         features = build_features(
             smc_data=payload,
             market_data=market_data,
@@ -519,9 +574,20 @@ class Orchestrator:
             )
 
     async def _weekly_maintenance_task(self) -> None:
-        """週次メンテナンス + LightGBM再学習。"""
+        """週次メンテナンス（再学習・レポート・DB整備・ロールバック判定）。"""
         from maintenance.scheduler import weekly_maintenance
         await weekly_maintenance(self._db_conn, self._notifier)
+
+        # 週次メンテ後に最新モデルを再読み込み
+        reload_result = self._predictor.load_all_models()
+        trained_pairs = [p for p, ok in reload_result.items() if ok]
+        skipped_pairs = [p for p, ok in reload_result.items() if not ok]
+
+        await self._notifier.send(
+            f"週次モデル再ロード完了\n"
+            f"Loaded: {', '.join(trained_pairs) if trained_pairs else 'none'}\n"
+            f"Missing: {', '.join(skipped_pairs) if skipped_pairs else 'none'}"
+        )
 
         # ロールバックチェック
         from optimizer.weekend_optimizer import check_weekly_rollback

@@ -11,6 +11,14 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DB_PATH = PROJECT_ROOT / "db" / "trading.db"
+DEFAULT_DB_BACKUP_PATH = PROJECT_ROOT / "db" / "backup"
+DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
+DEFAULT_MODEL_DIR = PROJECT_ROOT / "models"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
+
+
 class Settings(BaseSettings):
     """環境変数（.env）から読み込む静的設定・シークレット。"""
 
@@ -27,13 +35,13 @@ class Settings(BaseSettings):
     mt5_server: str
 
     # DB
-    db_path: str = "C:/fx_system/db/trading.db"
-    db_backup_path: str = "C:/fx_system/db/backup/"
+    db_path: str = str(DEFAULT_DB_PATH)
+    db_backup_path: str = str(DEFAULT_DB_BACKUP_PATH)
 
     # System
-    log_dir: str = "C:/fx_system/logs/"
-    model_dir: str = "C:/fx_system/models/"
-    config_path: str = "C:/fx_system/config.json"
+    log_dir: str = str(DEFAULT_LOG_DIR)
+    model_dir: str = str(DEFAULT_MODEL_DIR)
+    config_path: str = str(DEFAULT_CONFIG_PATH)
     demo_mode: bool = True
 
     # Webhook
@@ -49,10 +57,16 @@ def load_trading_config(config_path: str | None = None) -> dict:
     週末自動最適化で書き換えられるパラメータはこちらで管理。
     """
     if config_path is None:
-        config_path = "config.json"
+        config_path = str(DEFAULT_CONFIG_PATH)
     path = Path(config_path)
     if not path.exists():
-        raise FileNotFoundError(f"config.json が見つかりません: {path}")
+        fallback_path = DEFAULT_CONFIG_PATH
+        if fallback_path.exists():
+            path = fallback_path
+        else:
+            raise FileNotFoundError(
+                f"config.json が見つかりません: requested={path} fallback={fallback_path}"
+            )
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 

@@ -1,0 +1,231 @@
+"""
+実データ自動再学習モジュール
+
+- training_samples に保存された特徴量を使用
+- MT5履歴から将来価格を取得してラベル付け
+- 週次メンテで再学習を実行
+"""
+
+from datetime import datetime, timedelta, timezone
+import sqlite3
+
+import MetaTrader5 as mt5
+import numpy as np
+from loguru import logger
+
+from config.settings import get_settings, get_trading_config
+from core.database import (
+    get_unlabeled_training_samples,
+    get_labeled_training_samples,
+    update_training_label,
+)
+from core.time_manager import now_utc
+from ml.lgbm_model import FEATURE_NAMES
+from ml.trainer import train_model, walk_forward_validate
+
+
+def _to_datetime_utc(iso_str: str) -> datetime:
+    dt = datetime.fromisoformat(iso_str)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _pip_unit(pair: str) -> float:
+    return 0.01 if pair in ("USDJPY", "GBPJPY") else 0.0001
+
+
+def _label_from_return(return_pips: float, atr_price: float, pair: str) -> int:
+    atr_pips = abs(atr_price) / _pip_unit(pair) if atr_price else 0.0
+    threshold = max(2.0, atr_pips * 0.30)
+    if return_pips > threshold:
+        return 0
+    if return_pips < -threshold:
+        return 2
+    return 1
+
+
+def _get_future_close(pair: str, signal_time_utc: datetime, horizon_minutes: int) -> float | None:
+    target_time = signal_time_utc + timedelta(minutes=horizon_minutes)
+    start = target_time - timedelta(minutes=30)
+    end = target_time + timedelta(hours=2)
+
+    rates = mt5.copy_rates_range(pair, mt5.TIMEFRAME_M15, start, end)
+    if rates is None or len(rates) == 0:
+        return None
+
+    for row in rates:
+        bar_time = datetime.fromtimestamp(int(row["time"]), tz=timezone.utc)
+        if bar_time >= target_time:
+            return float(row["close"])
+
+    return float(rates[-1]["close"])
+
+
+def label_unlabeled_samples(
+    db_conn: sqlite3.Connection,
+    horizon_minutes: int = 240,
+    limit: int = 5000,
+) -> dict:
+    """未ラベルサンプルに将来価格ベースでラベル付けを行う。"""
+    settings = get_settings()
+
+    if not mt5.initialize(
+        login=settings.mt5_login,
+        password=settings.mt5_password.get_secret_value(),
+        server=settings.mt5_server,
+    ):
+        err = mt5.last_error()
+        logger.error(f"MT5 initialize failed in label_unlabeled_samples: {err}")
+        return {"labeled": 0, "skipped": 0, "error": f"mt5_init_failed: {err}"}
+
+    labeled = 0
+    skipped = 0
+
+    try:
+        rows = get_unlabeled_training_samples(db_conn, limit=limit)
+        for sample in rows:
+            try:
+                signal_time = _to_datetime_utc(sample["signal_time"])
+                future_close = _get_future_close(sample["pair"], signal_time, horizon_minutes)
+                if future_close is None:
+                    skipped += 1
+                    continue
+
+                close_price = float(sample.get("close_price") or 0.0)
+                if close_price <= 0:
+                    skipped += 1
+                    continue
+
+                pu = _pip_unit(sample["pair"])
+                return_pips = (future_close - close_price) / pu
+                label = _label_from_return(return_pips, float(sample.get("atr") or 0.0), sample["pair"])
+
+                update_training_label(
+                    db_conn,
+                    sample_id=int(sample["id"]),
+                    label=label,
+                    future_close=future_close,
+                    future_return_pips=float(return_pips),
+                )
+                labeled += 1
+            except Exception as e:
+                logger.warning(f"Labeling skipped for sample id={sample.get('id')}: {e}")
+                skipped += 1
+
+    finally:
+        mt5.shutdown()
+
+    logger.info(f"Labeling completed: labeled={labeled}, skipped={skipped}")
+    return {"labeled": labeled, "skipped": skipped}
+
+
+def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
+    X = []
+    y = []
+    for row in rows:
+        X.append([
+            float(row.get("fvg_4h_zone_active", 0)),
+            float(row.get("ob_4h_zone_active", 0)),
+            float(row.get("liq_sweep_1h", 0)),
+            float(row.get("liq_sweep_qualified", 0)),
+            float(row.get("bos_1h", 0)),
+            float(row.get("choch_1h", 0)),
+            float(row.get("msb_15m_confirmed", 0)),
+            float(row.get("mtf_confluence", 0)),
+            float(row.get("atr", 0.0)),
+            float(row.get("atr_ratio", 1.0)),
+            float(row.get("bb_width", 0.0)),
+            float(row.get("close_vs_ema20_4h", 0.0)),
+            float(row.get("close_vs_ema50_4h", 0.0)),
+            float(row.get("high_low_range_15m", 0.0)),
+            float(row.get("spread_pips", 1.5)),
+            float(row.get("session_flag", 0)),
+            float(row.get("hour_of_day", 0)),
+            float(row.get("day_of_week", 0)),
+            float(row.get("macd_histogram", 0.0)),
+            float(row.get("macd_signal_cross", 0)),
+            float(row.get("rsi_14", 50.0)),
+            float(row.get("rsi_zone", 0)),
+            float(row.get("stoch_k", 50.0)),
+            float(row.get("stoch_d", 50.0)),
+            float(row.get("momentum_3bar", 0.0)),
+            float(row.get("ob_4h_distance_pips", 0.0)),
+            float(row.get("fvg_4h_fill_ratio", 0.0)),
+            float(row.get("liq_sweep_strength", 0.0)),
+            float(row.get("prior_candle_body_ratio", 0.5)),
+            float(row.get("consecutive_same_dir", 0)),
+            float(row.get("pivot_proximity", 0.0)),
+            float(row.get("sweep_pending_bars", 0)),
+            float(row.get("open_positions_count", 0)),
+            float(row.get("max_dd_24h", 0.0)),
+            float(row.get("calendar_risk_score", 0)),
+            float(row.get("sentiment_score", 0.0)),
+        ])
+        y.append(int(row["label"]))
+
+    X_np = np.array(X, dtype=np.float64)
+    y_np = np.array(y, dtype=np.int32)
+
+    if X_np.shape[1] != len(FEATURE_NAMES):
+        raise ValueError(f"Feature count mismatch: got {X_np.shape[1]}, expected {len(FEATURE_NAMES)}")
+
+    return X_np, y_np
+
+
+def retrain_models_from_db(
+    db_conn: sqlite3.Connection,
+    model_dir: str,
+    lookback_days: int = 90,
+    min_samples_per_pair: int = 300,
+) -> dict:
+    """DBのラベル済みサンプルから通貨ペア別に再学習する。"""
+    config = get_trading_config()
+    pairs = config["system"]["pairs"]
+
+    result = {
+        "trained_pairs": [],
+        "skipped_pairs": {},
+        "validation": {},
+    }
+
+    for pair in pairs:
+        rows = get_labeled_training_samples(db_conn, pair=pair, days=lookback_days)
+        if len(rows) < min_samples_per_pair:
+            reason = f"insufficient_samples({len(rows)}<{min_samples_per_pair})"
+            result["skipped_pairs"][pair] = reason
+            logger.warning(f"Retrain skipped for {pair}: {reason}")
+            continue
+
+        X, y = _build_xy(rows)
+        val = walk_forward_validate(X, y)
+        train_model(X, y, pair=pair, model_dir=model_dir)
+
+        result["trained_pairs"].append(pair)
+        result["validation"][pair] = val
+        logger.info(f"Retrained model for {pair}: samples={len(rows)} acc={val.get('accuracy', 0):.4f}")
+
+    return result
+
+
+def run_weekly_retraining(db_conn: sqlite3.Connection) -> dict:
+    """週次バッチ: ラベル付け→再学習を一括実行。"""
+    settings = get_settings()
+    config = get_trading_config()
+
+    horizon_minutes = int(config.get("ml", {}).get("label_horizon_minutes", 240))
+    min_samples_per_pair = int(config.get("ml", {}).get("min_samples_per_pair", 300))
+
+    labeling = label_unlabeled_samples(db_conn, horizon_minutes=horizon_minutes)
+    retrain = retrain_models_from_db(
+        db_conn,
+        model_dir=settings.model_dir,
+        lookback_days=90,
+        min_samples_per_pair=min_samples_per_pair,
+    )
+
+    return {
+        "labeling": labeling,
+        "retrain": retrain,
+        "run_at_utc": now_utc().isoformat(),
+    }

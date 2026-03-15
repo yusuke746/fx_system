@@ -100,10 +100,61 @@ CREATE TABLE IF NOT EXISTS optimization_history (
     created_at           TIMESTAMP DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS training_samples (
+    id                       INTEGER PRIMARY KEY,
+    pair                     TEXT NOT NULL,
+    signal_time              TIMESTAMP NOT NULL, -- UTC
+    direction                TEXT,
+    close_price              REAL,
+    atr                      REAL,
+    fvg_4h_zone_active       INTEGER,
+    ob_4h_zone_active        INTEGER,
+    liq_sweep_1h             INTEGER,
+    liq_sweep_qualified      INTEGER,
+    bos_1h                   INTEGER,
+    choch_1h                 INTEGER,
+    msb_15m_confirmed        INTEGER,
+    mtf_confluence           INTEGER,
+    atr_ratio                REAL,
+    bb_width                 REAL,
+    close_vs_ema20_4h        REAL,
+    close_vs_ema50_4h        REAL,
+    high_low_range_15m       REAL,
+    macd_histogram           REAL,
+    macd_signal_cross        INTEGER,
+    rsi_14                   REAL,
+    rsi_zone                 INTEGER,
+    stoch_k                  REAL,
+    stoch_d                  REAL,
+    momentum_3bar            REAL,
+    ob_4h_distance_pips      REAL,
+    fvg_4h_fill_ratio        REAL,
+    liq_sweep_strength       REAL,
+    prior_candle_body_ratio  REAL,
+    consecutive_same_dir     INTEGER,
+    pivot_proximity          REAL,
+    sweep_pending_bars       INTEGER,
+    spread_pips              REAL DEFAULT 1.5,
+    session_flag             INTEGER,
+    hour_of_day              INTEGER,
+    day_of_week              INTEGER,
+    open_positions_count     INTEGER DEFAULT 0,
+    max_dd_24h               REAL DEFAULT 0,
+    calendar_risk_score      INTEGER DEFAULT 0,
+    sentiment_score          REAL DEFAULT 0,
+    label                    INTEGER,            -- 0=up, 1=flat, 2=down
+    future_close_price       REAL,
+    future_return_pips       REAL,
+    labeled_at               TIMESTAMP,
+    created_at               TIMESTAMP DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_pair_open ON trades(pair, open_time);
 CREATE INDEX IF NOT EXISTS idx_trades_close_time ON trades(close_time);
 CREATE INDEX IF NOT EXISTS idx_signals_pair_time ON signals(pair, signal_time);
 CREATE INDEX IF NOT EXISTS idx_api_call_time ON api_call_log(call_time);
+CREATE INDEX IF NOT EXISTS idx_training_pair_time ON training_samples(pair, signal_time);
+CREATE INDEX IF NOT EXISTS idx_training_unlabeled ON training_samples(label, signal_time);
 """
 
 
@@ -242,3 +293,125 @@ def check_integrity(conn: sqlite3.Connection) -> bool:
     """DB整合性チェック。"""
     result = conn.execute("PRAGMA integrity_check").fetchone()
     return result[0] == "ok"
+
+
+def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
+    """学習用サンプル（特徴量36個）を保存する。"""
+    cur = conn.execute(
+        """INSERT INTO training_samples (
+           pair, signal_time, direction, close_price, atr,
+           fvg_4h_zone_active, ob_4h_zone_active, liq_sweep_1h,
+           liq_sweep_qualified, bos_1h, choch_1h, msb_15m_confirmed,
+           mtf_confluence, atr_ratio, bb_width,
+           close_vs_ema20_4h, close_vs_ema50_4h, high_low_range_15m,
+           macd_histogram, macd_signal_cross, rsi_14, rsi_zone,
+           stoch_k, stoch_d, momentum_3bar,
+           ob_4h_distance_pips, fvg_4h_fill_ratio, liq_sweep_strength,
+           prior_candle_body_ratio, consecutive_same_dir, pivot_proximity,
+           sweep_pending_bars, spread_pips, session_flag, hour_of_day, day_of_week,
+           open_positions_count, max_dd_24h, calendar_risk_score, sentiment_score
+        ) VALUES (
+           ?, ?, ?, ?, ?,
+           ?, ?, ?,
+           ?, ?, ?, ?,
+           ?, ?, ?,
+           ?, ?, ?,
+           ?, ?, ?, ?,
+           ?, ?, ?,
+           ?, ?, ?,
+           ?, ?, ?,
+           ?, ?, ?, ?, ?,
+           ?, ?, ?, ?
+        )""",
+        (
+            sample["pair"],
+            sample["signal_time"].isoformat(),
+            sample.get("direction"),
+            sample.get("close_price"),
+            sample.get("atr"),
+            int(sample.get("fvg_4h_zone_active", False)),
+            int(sample.get("ob_4h_zone_active", False)),
+            int(sample.get("liq_sweep_1h", False)),
+            int(sample.get("liq_sweep_qualified", False)),
+            int(sample.get("bos_1h", False)),
+            int(sample.get("choch_1h", False)),
+            int(sample.get("msb_15m_confirmed", False)),
+            sample.get("mtf_confluence", 0),
+            sample.get("atr_ratio", 1.0),
+            sample.get("bb_width", 0.0),
+            sample.get("close_vs_ema20_4h", 0.0),
+            sample.get("close_vs_ema50_4h", 0.0),
+            sample.get("high_low_range_15m", 0.0),
+            sample.get("macd_histogram", 0.0),
+            sample.get("macd_signal_cross", 0),
+            sample.get("rsi_14", 50.0),
+            sample.get("rsi_zone", 0),
+            sample.get("stoch_k", 50.0),
+            sample.get("stoch_d", 50.0),
+            sample.get("momentum_3bar", 0.0),
+            sample.get("ob_4h_distance_pips", 0.0),
+            sample.get("fvg_4h_fill_ratio", 0.0),
+            sample.get("liq_sweep_strength", 0.0),
+            sample.get("prior_candle_body_ratio", 0.5),
+            sample.get("consecutive_same_dir", 0),
+            sample.get("pivot_proximity", 0.0),
+            sample.get("sweep_pending_bars", 0),
+            sample.get("spread_pips", 1.5),
+            sample.get("session_flag", 0),
+            sample.get("hour_of_day", 0),
+            sample.get("day_of_week", 0),
+            sample.get("open_positions_count", 0),
+            sample.get("max_dd_24h", 0.0),
+            sample.get("calendar_risk_score", 0),
+            sample.get("sentiment_score", 0.0),
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_unlabeled_training_samples(
+    conn: sqlite3.Connection,
+    limit: int = 5000,
+) -> list[dict]:
+    """未ラベル学習サンプルを取得する。"""
+    rows = conn.execute(
+        "SELECT * FROM training_samples WHERE label IS NULL ORDER BY signal_time ASC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_training_label(
+    conn: sqlite3.Connection,
+    sample_id: int,
+    label: int,
+    future_close: float,
+    future_return_pips: float,
+) -> None:
+    """学習サンプルにラベルを付与する。"""
+    conn.execute(
+        """UPDATE training_samples
+           SET label=?, future_close_price=?, future_return_pips=?, labeled_at=?
+           WHERE id=?""",
+        (label, future_close, future_return_pips, now_utc().isoformat(), sample_id),
+    )
+    conn.commit()
+
+
+def get_labeled_training_samples(
+    conn: sqlite3.Connection,
+    pair: str,
+    days: int = 90,
+) -> list[dict]:
+    """指定ペアのラベル済み学習サンプルを取得する。"""
+    from datetime import timedelta
+
+    cutoff = (now_utc() - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """SELECT * FROM training_samples
+           WHERE pair=? AND label IS NOT NULL AND signal_time>=?
+           ORDER BY signal_time ASC""",
+        (pair, cutoff),
+    ).fetchall()
+    return [dict(r) for r in rows]

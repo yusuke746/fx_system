@@ -132,7 +132,7 @@ def build_features(
     calendar_risk_score: int = 0,
 ) -> np.ndarray:
     """
-    32特徴量ベクトルを構築する。
+    36特徴量ベクトルを構築する。
 
     Args:
         smc_data: TradingView Webhook から受け取った SMC データ
@@ -142,7 +142,7 @@ def build_features(
         calendar_risk_score: 経済指標リスクスコア (0/1/2)
 
     Returns:
-        shape=(1, 32) の numpy 配列
+        shape=(1, 36) の numpy 配列
     """
     now = now_utc()
     jst_now = to_jst(now)
