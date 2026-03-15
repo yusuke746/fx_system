@@ -10,6 +10,7 @@
     - Discord にポジションサマリー送信
 
   毎週日曜 23:00 JST:
+        - training_samples クリーンアップ（label済み180日超を削除）
     - signals アーカイブ移動
     - VACUUM ANALYZE
     - api_call_log 週次集計
@@ -96,17 +97,27 @@ async def weekly_maintenance(
     # 0. LightGBM 再学習（未ラベル→ラベル付け→再学習）
     retrain_result = run_weekly_retraining(db_conn)
 
-    # 1. signals アーカイブ移動（30日以前）
+    # 1. training_samples クリーンアップ（label済み180日超）
+    training_cutoff = (now - timedelta(days=180)).isoformat()
+    cur = db_conn.execute(
+        "DELETE FROM training_samples WHERE label IS NOT NULL AND signal_time < ?",
+        (training_cutoff,),
+    )
+    deleted_training_samples = cur.rowcount if cur.rowcount is not None else 0
+    db_conn.commit()
+    logger.info(f"Old labeled training_samples cleaned up: {deleted_training_samples}")
+
+    # 2. signals アーカイブ移動（30日以前）
     cutoff = (now - timedelta(days=30)).isoformat()
     db_conn.execute("DELETE FROM signals WHERE signal_time < ?", (cutoff,))
     db_conn.commit()
     logger.info("Old signals cleaned up")
 
-    # 2. VACUUM ANALYZE
+    # 3. VACUUM ANALYZE
     db_conn.execute("VACUUM")
     logger.info("DB VACUUM completed")
 
-    # 3. api_call_log 週次集計
+    # 4. api_call_log 週次集計
     week_start = (now - timedelta(days=7)).isoformat()
     row = db_conn.execute(
         "SELECT COUNT(*) as cnt, COALESCE(SUM(cost_usd), 0) as total_cost "
@@ -114,7 +125,7 @@ async def weekly_maintenance(
         (week_start,),
     ).fetchone()
 
-    # 4. 週次レポート
+    # 5. 週次レポート
     trades_row = db_conn.execute(
         "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl_jpy), 0) as total_pnl, "
         "COALESCE(AVG(pnl_pips), 0) as avg_pips "
@@ -137,6 +148,7 @@ async def weekly_maintenance(
         f"平均P&L: {trades_row['avg_pips']:.1f} pips\n"
         f"合計P&L: ¥{trades_row['total_pnl']:,.0f}\n"
         f"GPT API呼び出し: {row['cnt']}回 / ${row['total_cost']:.2f}\n"
+        f"training_samples削除(180日超・label済): {deleted_training_samples}\n"
         f"再学習: labeled={retrain_result['labeling']['labeled']} / "
         f"trained={len(retrain_result['retrain']['trained_pairs'])}"
     )
