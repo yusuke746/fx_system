@@ -51,7 +51,7 @@ from core.risk_manager import (
     check_exposure,
     check_daily_drawdown,
 )
-from core.time_manager import now_utc, format_jst, is_excluded_hours, to_jst
+from core.time_manager import now_utc, format_jst, is_excluded_hours, to_jst, is_broker_market_closed
 from broker.mt5_broker import MT5Broker
 from llm.llm_client import DiffDetector, LLMClient
 from ml.lgbm_model import LGBMPredictor, build_features
@@ -106,6 +106,9 @@ class Orchestrator:
 
         # スケジューラ
         self._scheduler = AsyncIOScheduler()
+
+        # LLMエラー通知のスロットリング
+        self._last_llm_model_error_notify = None
 
     async def start(self) -> None:
         """システムを起動する。"""
@@ -516,6 +519,10 @@ class Orchestrator:
             if not config["llm"].get("llm_enabled", True):
                 return
 
+            # 市場クローズ中は差分検知不要（APIコスト/エラーノイズ抑制）
+            if is_broker_market_closed():
+                return
+
             for pair in config["system"]["pairs"]:
                 veto_active, _ = self._calendar_veto.is_veto_active(pair)
 
@@ -527,14 +534,33 @@ class Orchestrator:
                 )
 
                 if should_call:
-                    result = await self._llm_client.analyze_sentiment(
-                        pair=pair,
-                        news_articles=[],
-                        market_context="",
-                        reason=reason,
-                    )
-                    self._diff_detector._cached_result = result
-                    self._diff_detector._last_call_time = now_utc()
+                    try:
+                        result = await self._llm_client.analyze_sentiment(
+                            pair=pair,
+                            news_articles=[],
+                            market_context="",
+                            reason=reason,
+                        )
+                        self._diff_detector._cached_result = result
+                        self._diff_detector._last_call_time = now_utc()
+                    except Exception as e:
+                        # モデル未提供/アクセス不可時は設定を変えず、通知のみ（スロットリング）
+                        msg = str(e)
+                        if "model_not_found" in msg or "does not exist" in msg:
+                            now = now_utc()
+                            should_notify = (
+                                self._last_llm_model_error_notify is None
+                                or (now - self._last_llm_model_error_notify).total_seconds() >= 3600
+                            )
+                            if should_notify:
+                                await self._notifier.send_alert(
+                                    "LLM呼び出し失敗: model_not_found。"
+                                    "llm_enabled は変更せず継続します（1時間ごとに通知）。"
+                                )
+                                self._last_llm_model_error_notify = now
+                            logger.warning("LLM model_not_found detected; keeping llm_enabled as-is")
+                            return
+                        raise
 
         except Exception as e:
             logger.error(f"Diff detection task error: {e}")

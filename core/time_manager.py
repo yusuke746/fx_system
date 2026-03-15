@@ -149,3 +149,28 @@ def is_friday_close_window(dt: datetime | None = None) -> bool:
         dt = now_utc()
     jst_dt = to_jst(dt)
     return jst_dt.weekday() == 4 and jst_dt.hour >= 22
+
+
+def is_broker_market_closed(dt: datetime | None = None) -> bool:
+    """
+    ブローカー基準で市場クローズ時間かどうかを判定する（JST基準）。
+
+    運用ルール:
+      - 金曜 22:00 JST 以降はクローズ
+      - 土曜・日曜はクローズ
+      - 月曜 07:00 JST までクローズ
+    """
+    if dt is None:
+        dt = now_utc()
+    jst_dt = to_jst(dt)
+
+    wd = jst_dt.weekday()  # Mon=0 ... Sun=6
+    hour = jst_dt.hour
+
+    if wd == 4 and hour >= 22:  # Fri late
+        return True
+    if wd in (5, 6):            # Sat/Sun
+        return True
+    if wd == 0 and hour < 7:    # Mon early
+        return True
+    return False
