@@ -66,6 +66,18 @@ def utc_to_mt5_server(dt: datetime) -> datetime:
     return dt.astimezone(EET)
 
 
+def broker_day_start_utc(dt: datetime | None = None) -> datetime:
+    """ブローカー時刻（EET）の当日00:00を UTC に変換して返す。"""
+    if dt is None:
+        dt = now_utc()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+
+    broker_now = utc_to_mt5_server(dt)
+    broker_midnight = broker_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return broker_midnight.astimezone(UTC)
+
+
 # ── 比較基準: 時間差計算ユーティリティ ────────────────
 def elapsed_seconds(since: datetime) -> float:
     """since（UTC aware）からの経過秒数を返す。"""

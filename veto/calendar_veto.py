@@ -14,6 +14,7 @@ FOMC・雇用統計等の前後30分をブロックする。
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 from loguru import logger
@@ -58,15 +59,20 @@ class CalendarVeto:
             except Exception as e:
                 logger.warning(f"Calendar fetch failed ({url}): {e}")
 
-        self._events = events
-        self._last_fetch = now_utc()
-        logger.info(f"Calendar events fetched: {len(events)} high-impact events")
-        return events
+        if events:
+            self._events = events
+            self._last_fetch = now_utc()
+            logger.info(f"Calendar events fetched: {len(events)} high-impact events")
+            return events
+
+        logger.warning("Calendar fetch returned 0 events. Keeping previous cache and freshness.")
+        return self._events
 
     def _parse_xml(self, content: bytes) -> list[dict]:
         """XML をパースして高インパクトイベントを抽出する。"""
         root = ET.fromstring(content)
         events = []
+        ny_tz = ZoneInfo("America/New_York")
 
         for event in root.findall("event"):
             currency = event.findtext("country", "")
@@ -83,9 +89,9 @@ class CalendarVeto:
             # Forex Factory は EST（UTC-5）で日時を提供
             try:
                 dt_str = f"{date_str} {time_str}"
-                dt_est = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p")
-                # EST → UTC に変換（保存基準）
-                dt_utc = dt_est.replace(tzinfo=UTC) + timedelta(hours=5)
+                dt_local = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p")
+                # ニューヨーク現地時刻として解釈し、UTCへ正規変換（DST考慮）
+                dt_utc = dt_local.replace(tzinfo=ny_tz).astimezone(UTC)
             except ValueError:
                 continue  # 時刻未定のイベントはスキップ
 

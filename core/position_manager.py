@@ -110,6 +110,7 @@ class PositionManager:
         sl_price: float,
         tp_price: float,
         atr: float,
+        signal_price: float,
     ) -> bool:
         """
         ドテン高速連続発注。
@@ -143,7 +144,7 @@ class PositionManager:
             pair=pair,
             direction=direction,
             volume=volume,
-            open_price=0.0,  # MT5から後で取得
+            open_price=signal_price,
             sl_price=sl_price,
             tp_price=tp_price,
             open_time_utc=now_utc(),

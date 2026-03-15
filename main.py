@@ -51,7 +51,15 @@ from core.risk_manager import (
     check_exposure,
     check_daily_drawdown,
 )
-from core.time_manager import now_utc, format_jst, is_excluded_hours, to_jst, is_broker_market_closed
+from core.time_manager import (
+    UTC,
+    now_utc,
+    format_jst,
+    is_excluded_hours,
+    to_jst,
+    is_broker_market_closed,
+    broker_day_start_utc,
+)
 from broker.mt5_broker import MT5Broker
 from llm.llm_client import DiffDetector, LLMClient
 from ml.lgbm_model import LGBMPredictor, build_features
@@ -105,7 +113,7 @@ class Orchestrator:
         self._risk_config = load_risk_config(self._config)
 
         # スケジューラ
-        self._scheduler = AsyncIOScheduler()
+        self._scheduler = AsyncIOScheduler(timezone=UTC)
 
         # LLMエラー通知のスロットリング
         self._last_llm_model_error_notify = None
@@ -121,8 +129,15 @@ class Orchestrator:
 
         # MT5 接続
         if not self._broker.connect():
-            await self._notifier.send_critical("MT5接続失敗。手動確認が必要です。")
-            logger.critical("MT5 connection failed. System will start without broker.")
+            self._running = False
+            message = (
+                "MT5接続失敗のためシステムを停止します。\n"
+                f"Server: {self._settings.mt5_server} / Login: {self._settings.mt5_login}\n"
+                "原因はログのMT5 initialize/login errorを確認してください。"
+            )
+            await self._notifier.send_critical(message)
+            logger.critical("MT5 connection failed. System will stop for fail-safe.")
+            raise RuntimeError("MT5 connection failed")
 
         # カレンダー取得
         try:
@@ -164,7 +179,7 @@ class Orchestrator:
         # 毎15分: 差分検知タスク
         self._scheduler.add_job(
             self._diff_detection_task,
-            CronTrigger(minute="*/15"),
+            CronTrigger(minute="*/15", timezone=UTC),
             id="diff_detection",
             name="Diff Detection (15min)",
         )
@@ -172,7 +187,7 @@ class Orchestrator:
         # 毎1分: ポジション監視
         self._scheduler.add_job(
             self._position_monitor_task,
-            CronTrigger(minute="*"),
+            CronTrigger(minute="*", timezone=UTC),
             id="position_monitor",
             name="Position Monitor (1min)",
         )
@@ -180,7 +195,7 @@ class Orchestrator:
         # 毎日 01:00 JST = 16:00 UTC（前日）
         self._scheduler.add_job(
             self._daily_maintenance_task,
-            CronTrigger(hour=16, minute=0),  # UTC
+            CronTrigger(hour=16, minute=0, timezone=UTC),  # UTC
             id="daily_maintenance",
             name="Daily Maintenance (01:00 JST)",
         )
@@ -188,7 +203,7 @@ class Orchestrator:
         # 毎週土曜 14:00 JST = 05:00 UTC
         self._scheduler.add_job(
             self._weekend_optimization_task,
-            CronTrigger(day_of_week="sat", hour=5, minute=0),  # UTC
+            CronTrigger(day_of_week="sat", hour=5, minute=0, timezone=UTC),  # UTC
             id="weekend_optimization",
             name="Weekend Optimization (Sat 14:00 JST)",
         )
@@ -196,9 +211,17 @@ class Orchestrator:
         # 毎週日曜 23:00 JST = 14:00 UTC
         self._scheduler.add_job(
             self._weekly_maintenance_task,
-            CronTrigger(day_of_week="sun", hour=14, minute=0),  # UTC
+            CronTrigger(day_of_week="sun", hour=14, minute=0, timezone=UTC),  # UTC
             id="weekly_maintenance",
             name="Weekly Maintenance (Sun 23:00 JST)",
+        )
+
+        # 毎日 02:00 JST（= 17:00 UTC 前日）に月次条件をガード判定
+        self._scheduler.add_job(
+            self._monthly_maintenance_guard_task,
+            CronTrigger(hour=17, minute=0, timezone=UTC),  # UTC
+            id="monthly_maintenance_guard",
+            name="Monthly Maintenance Guard (Daily 02:00 JST)",
         )
 
         logger.info("Scheduler configured with all maintenance jobs")
@@ -416,7 +439,7 @@ class Orchestrator:
                 )
                 await self._position_manager.execute_doten(
                     pair, pos.ticket, prediction.direction,
-                    lot, sl_price, tp_price, atr,
+                    lot, sl_price, tp_price, atr, close_price,
                 )
                 return
             else:
@@ -433,7 +456,10 @@ class Orchestrator:
             logger.info(f"Entry blocked by risk check: {reason}")
             return
 
-        daily_pnl = get_daily_pnl(self._db_conn)
+        daily_pnl = get_daily_pnl(
+            self._db_conn,
+            day_start_utc=broker_day_start_utc(),
+        )
         dd_allowed, dd_pct = check_daily_drawdown(
             daily_pnl, self._broker.get_account_balance(), self._risk_config,
         )
@@ -559,7 +585,7 @@ class Orchestrator:
                                 )
                                 self._last_llm_model_error_notify = now
                             logger.warning("LLM model_not_found detected; keeping llm_enabled as-is")
-                            return
+                            continue
                         raise
 
         except Exception as e:
@@ -621,6 +647,18 @@ class Orchestrator:
             reload_trading_config()
             self._risk_config = load_risk_config(get_trading_config())
             await self._notifier.send_alert("週次ロールバック実行: 前週パラメータに復元しました")
+
+    async def _monthly_maintenance_guard_task(self) -> None:
+        """月次メンテの実行条件（毎月第1日曜 02:00 JST）を判定して実行する。"""
+        now = now_utc()
+        jst_now = to_jst(now)
+
+        # 毎月月初の日曜 02:00 JST のみ実行
+        if not (jst_now.weekday() == 6 and jst_now.day <= 7 and jst_now.hour == 2):
+            return
+
+        from maintenance.scheduler import monthly_maintenance
+        await monthly_maintenance(self._db_conn, self._notifier, self._settings.model_dir)
 
 
 async def main() -> None:

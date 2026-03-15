@@ -64,6 +64,18 @@ class DiscordNotifier:
         """同期コンテキストから呼ぶためのラッパー。"""
         try:
             loop = asyncio.get_running_loop()
-            return asyncio.ensure_future(self.send(message, level)) is not None
+            logger.warning("send_sync called in running event loop. Scheduling async send.")
+            task = loop.create_task(self.send(message, level))
+
+            def _on_done(done_task: asyncio.Task):
+                try:
+                    ok = done_task.result()
+                    if not ok:
+                        logger.error("send_sync scheduled task completed with failure")
+                except Exception as e:
+                    logger.error(f"send_sync scheduled task exception: {e}")
+
+            task.add_done_callback(_on_done)
+            return False
         except RuntimeError:
             return asyncio.run(self.send(message, level))

@@ -22,7 +22,7 @@ import sqlite3
 import numpy as np
 from loguru import logger
 
-from config.settings import get_trading_config, save_trading_config
+from config.settings import get_settings, get_trading_config, save_trading_config
 from core.database import get_recent_trades, insert_optimization
 from core.time_manager import now_utc, format_jst
 
@@ -144,7 +144,7 @@ def run_weekend_optimization(db_conn: sqlite3.Connection) -> dict:
     config["risk"]["tp_multiplier"] = best_params["tp_mult"]
 
     try:
-        save_trading_config(config)
+        save_trading_config(config, get_settings().config_path)
     except Exception as e:
         logger.error(f"config.json write failed: {e}")
         insert_optimization(db_conn, {
@@ -229,7 +229,7 @@ def check_weekly_rollback(db_conn: sqlite3.Connection) -> bool:
             config["risk"]["scale_out_step2_ratio"] = row["step2_ratio"]
             config["risk"]["sl_multiplier"] = row["sl_multiplier"]
             config["risk"]["tp_multiplier"] = row["tp_multiplier"]
-            save_trading_config(config)
+            save_trading_config(config, get_settings().config_path)
             logger.info("Rollback to previous parameters completed")
             return True
 

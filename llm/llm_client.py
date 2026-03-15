@@ -16,6 +16,7 @@ GPT-5.2 差分検知モジュール（Veto Layer B を含む）
   - Discord通知: 表示基準（JST）で表示
 """
 
+import asyncio
 import hashlib
 import json
 import sqlite3
@@ -173,7 +174,8 @@ class LLMClient:
         prompt = self._build_prompt(pair, news_articles, market_context)
 
         try:
-            response = self._client.chat.completions.create(
+            response = await asyncio.to_thread(
+                self._client.chat.completions.create,
                 model=self._model,
                 messages=[
                     {"role": "system", "content": self._system_prompt()},

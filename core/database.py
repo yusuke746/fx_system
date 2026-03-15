@@ -10,7 +10,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from core.time_manager import now_utc
+from core.time_manager import now_utc, broker_day_start_utc
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
@@ -279,9 +279,11 @@ def get_recent_trades(conn: sqlite3.Connection, pair: str | None = None,
     return [dict(r) for r in rows]
 
 
-def get_daily_pnl(conn: sqlite3.Connection) -> float:
-    """当日（UTC 00:00〜）のP&L合計（円）を返す。"""
-    today_start = now_utc().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+def get_daily_pnl(conn: sqlite3.Connection, day_start_utc=None) -> float:
+    """当日（ブローカー日付の00:00起点）のP&L合計（円）を返す。"""
+    if day_start_utc is None:
+        day_start_utc = broker_day_start_utc()
+    today_start = day_start_utc.isoformat()
     row = conn.execute(
         "SELECT COALESCE(SUM(pnl_jpy), 0) as total FROM trades WHERE close_time>=?",
         (today_start,),

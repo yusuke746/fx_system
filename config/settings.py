@@ -74,8 +74,11 @@ def load_trading_config(config_path: str | None = None) -> dict:
 def save_trading_config(config: dict, config_path: str | None = None) -> None:
     """config.json を書き出す（週末最適化結果の反映用）。"""
     if config_path is None:
-        config_path = "config.json"
+        config_path = str(DEFAULT_CONFIG_PATH)
     path = Path(config_path)
+    if not path.is_absolute():
+        path = (PROJECT_ROOT / path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
