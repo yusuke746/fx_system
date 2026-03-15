@@ -5,8 +5,10 @@
     "demo_mode": true
   },
   "llm": {
-    "model_instant": "gpt-5.2-instant",
-    "model_thinking": "gpt-5.2-thinking",
+    "model_instant": "gpt-5.2",
+    "model_thinking": "gpt-5.2",
+    "reasoning_effort_instant": "low",
+    "reasoning_effort_thinking": "medium",
     "llm_enabled": true,
     "atr_threshold_multiplier": 1.5,
     "cache_ttl_normal_minutes": 60,

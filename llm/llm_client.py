@@ -144,13 +144,14 @@ class DiffDetector:
 
 
 class LLMClient:
-    """GPT-5.2 API クライアント。"""
+    """GPT-5.2 API クライアント（Responses API 使用）。"""
 
     def __init__(self, api_key: str, db_conn: sqlite3.Connection | None = None):
-        self._client = openai.OpenAI(api_key=api_key)
+        self._client = openai.AsyncOpenAI(api_key=api_key)
         self._db_conn = db_conn
         self._config = get_trading_config()
         self._model = self._config["llm"]["model_instant"]
+        self._reasoning_effort = self._config["llm"].get("reasoning_effort_instant", "low")
 
     async def analyze_sentiment(
         self,
@@ -160,7 +161,7 @@ class LLMClient:
         reason: str,
     ) -> SentimentResult:
         """
-        GPT-5.2 にセンチメント分析を依頼する。
+        GPT-5.2 にセンチメント分析を依頼する（Responses API）。
 
         Args:
             pair: 通貨ペア
@@ -172,22 +173,32 @@ class LLMClient:
             SentimentResult
         """
         prompt = self._build_prompt(pair, news_articles, market_context)
+        messages = [
+            {"role": "system", "content": self._system_prompt()},
+            {"role": "user", "content": prompt},
+        ]
 
         try:
-            response = await asyncio.to_thread(
-                self._client.chat.completions.create,
+            response = await self._client.responses.create(
                 model=self._model,
-                messages=[
-                    {"role": "system", "content": self._system_prompt()},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.1,
-                max_tokens=500,
-                response_format={"type": "json_object"},
+                input=messages,
+                reasoning={"effort": self._reasoning_effort},
             )
 
-            content = response.choices[0].message.content
-            parsed = json.loads(content)
+            # Responses API: response.output を走査してメッセージテキストを抽出
+            # reasoning item は type="reasoning" でスキップ
+            text = ""
+            for item in response.output:
+                if getattr(item, "type", "") != "message":
+                    continue
+                content = getattr(item, "content", None)
+                if content is None:
+                    continue
+                for block in content:
+                    if hasattr(block, "text"):
+                        text += block.text
+
+            parsed = json.loads(text)
 
             result = SentimentResult(
                 sentiment_score=float(parsed.get("sentiment_score", 0.0)),
@@ -198,13 +209,15 @@ class LLMClient:
             # API呼び出しログ記録（保存基準: UTC）
             if self._db_conn:
                 usage = response.usage
-                cost = self._estimate_cost(usage.prompt_tokens, usage.completion_tokens)
+                tokens_in = usage.input_tokens
+                tokens_out = usage.output_tokens
+                cost = self._estimate_cost(tokens_in, tokens_out)
                 insert_api_call(
                     self._db_conn,
                     reason=reason,
                     model=self._model,
-                    tokens_in=usage.prompt_tokens,
-                    tokens_out=usage.completion_tokens,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
                     cost_usd=cost,
                 )
 
@@ -263,5 +276,5 @@ class LLMClient:
         )
 
     def _estimate_cost(self, tokens_in: int, tokens_out: int) -> float:
-        """GPT-5.2-instant のコスト概算（$1.75/M tokens）。"""
-        return (tokens_in + tokens_out) * 1.75 / 1_000_000
+        """GPT-5.2 のコスト概算（input $1.75/M、output $14/M tokens）。"""
+        return (tokens_in * 1.75 + tokens_out * 14.0) / 1_000_000
