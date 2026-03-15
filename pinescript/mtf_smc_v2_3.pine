@@ -43,6 +43,7 @@ i_session_end    = input.int(21,           "セッション終了 UTC時")
 i_confluence_min = input.int(2,            "MTF合致最低スコア",    minval=1, maxval=5)
 i_swing_lookback = input.int(5,            "Swing ルックバック (1H)")
 i_swing_15m      = input.int(3,            "Swing ルックバック (15M) [NEW]")
+i_webhook_token  = input.string("",        "Webhook共有トークン", tooltip=".env の WEBHOOK_SECRET と同じ値")
 
 // ── [NEW v2.3] 追加パラメータ ──────────────────────────────────
 i_sweep_min_str  = input.float(0.3, "Sweep最小強度 ATR倍率 [NEW]",
@@ -451,7 +452,7 @@ short_condition =
 // ※ グローバル変数に直接アクセス（Pine Script v5仕様）
 f_build_json(dir, msb_conf, choch_flag) =>
     _mc = macd_cross_up ? 1 : (macd_cross_down ? -1 : 0)
-    _p1 = '{"pair":"' + i_pair + '","direction":"' + dir + '","msb_15m_confirmed":' + str.tostring(msb_conf) + ',"choch_1h":' + str.tostring(choch_flag)
+    _p1 = '{"pair":"' + i_pair + '","direction":"' + dir + '","webhook_token":"' + i_webhook_token + '","msb_15m_confirmed":' + str.tostring(msb_conf) + ',"choch_1h":' + str.tostring(choch_flag)
     _p2 = ',"fvg_4h_zone_active":' + str.tostring(fvg_4h_zone_active) + ',"ob_4h_zone_active":' + str.tostring(ob_4h_zone_active) + ',"liq_sweep_1h":' + str.tostring(liq_sweep_1h) + ',"liq_sweep_qualified":' + str.tostring(liq_sweep_qualified) + ',"bos_1h":' + str.tostring(bos_1h)
     _p3 = ',"mtf_confluence":' + str.tostring(mtf_confluence) + ',"atr":' + str.tostring(math.round(atr_14, 5)) + ',"close":' + str.tostring(math.round(close, 5)) + ',"atr_ratio":' + str.tostring(math.round(atr_ratio, 4)) + ',"bb_width":' + str.tostring(math.round(bb_width, 4))
     _p4 = ',"rsi_14":' + str.tostring(math.round(rsi_14, 2)) + ',"rsi_zone":' + str.tostring(rsi_zone) + ',"macd_histogram":' + str.tostring(math.round(macd_hist, 6)) + ',"macd_signal_cross":' + str.tostring(_mc)

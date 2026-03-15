@@ -2,17 +2,15 @@
 FastAPI Webhook サーバー
 
 ■ セキュリティ
-  - HMAC-SHA256 署名検証（TradingView IPホワイトリスト + 署名）
-  - 署名不一致は 429 を返して破棄
-  - 5分以内に3回以上の署名不一致で Discord 通知
+    - JSON内共有トークン照合（TradingView制約に対応）
+    - トークン不一致は 429 を返して破棄
+    - 5分以内に3回以上の認証失敗で Discord 通知
 
 ■ 時刻基準
   - Webhook 受信時刻: 保存基準（UTC）で記録
   - ログ・Discord通知: 表示基準（JST）
 """
 
-import hashlib
-import hmac
 import time
 from collections import defaultdict
 
@@ -28,16 +26,6 @@ app = FastAPI(title="FX Auto-Trading Webhook", version="2.2")
 _failed_sig_counts: dict[str, list[float]] = defaultdict(list)
 _FAIL_WINDOW_SEC = 300  # 5分
 _FAIL_THRESHOLD = 3
-
-
-def verify_signature(body: bytes, signature: str, secret: str) -> bool:
-    """HMAC-SHA256 署名を検証する。"""
-    expected = hmac.new(
-        secret.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
 
 
 @app.post("/webhook")
@@ -59,22 +47,20 @@ async def receive_webhook(request: Request):
     }
     """
     settings = get_settings()
-    body = await request.body()
-
-    # 署名検証
-    signature = request.headers.get("X-Signature", "")
-    secret = settings.webhook_secret.get_secret_value()
-
-    if secret and not verify_signature(body, signature, secret):
-        client_ip = request.client.host if request.client else "unknown"
-        _record_sig_failure(client_ip)
-        logger.warning(f"Webhook signature verification failed from {client_ip}")
-        raise HTTPException(status_code=429, detail="Signature verification failed")
 
     try:
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    # 共有トークン検証（JSON内）
+    secret = settings.webhook_secret.get_secret_value()
+    provided_token = str(payload.get("webhook_token", ""))
+    if secret and provided_token != secret:
+        client_ip = request.client.host if request.client else "unknown"
+        _record_sig_failure(client_ip)
+        logger.warning(f"Webhook token verification failed from {client_ip}")
+        raise HTTPException(status_code=429, detail="Webhook token verification failed")
 
     # 必須フィールドのバリデーション
     required = ["pair", "direction", "mtf_confluence", "atr", "close"]
