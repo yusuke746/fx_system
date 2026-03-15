@@ -21,8 +21,10 @@ pandas>=2.3.0,<3; python_version >= "3.14"
 openai==1.68.0
 
 # Config / Env
-pydantic==2.10.6
-pydantic-settings==2.7.1
+pydantic==2.10.6; python_version < "3.14"
+pydantic>=2.11.0,<3; python_version >= "3.14"
+pydantic-settings==2.7.1; python_version < "3.14"
+pydantic-settings>=2.8.0,<3; python_version >= "3.14"
 python-dotenv==1.0.1
 
 # HTTP / XML
@@ -30,7 +32,8 @@ requests==2.32.3
 httpx==0.28.1
 
 # Discord notifications
-aiohttp==3.11.12
+aiohttp==3.11.12; python_version < "3.14"
+aiohttp>=3.12.0,<4; python_version >= "3.14"
 
 # Scheduling
 apscheduler==3.11.0
