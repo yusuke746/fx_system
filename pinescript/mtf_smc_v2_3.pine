@@ -1,0 +1,561 @@
+// =====================================================
+// FX Auto-Trading System v2.3 — MTF SMC Pine Script
+// =====================================================
+// 3層構造: 4H（方向） + 1H（壁・Sweep） + 15M（MSB実行）
+//
+// ■ v2.2 → v2.3 変更点
+//   [1] Sweep強度フィルター: i_sweep_min_str 以上でのみ mtf_confluence に加算
+//   [2] 1H Sweep後の15M MSB確認ステートマシン追加
+//       → エントリーは「Sweep検出 → 15M構造ブレイク確認後」に絞り込み
+//       → タイムアウト(i_sweep_timeout バー)でリセット
+//   [3] FVGミティゲーション: 充填率 >= i_fvg_mit_ratio でゾーン自動無効化
+//   [4] OBミティゲーション: ゾーン中央突破で使用済みフラグ (ob_4h_valid)
+//   [5] ChoCH検出: BOS継続 vs ChoCH転換を独立実装、スコアに加算（最大5点）
+//   [6] f_build_json() 関数化: JSON重複コードを排除・保守性向上
+//
+// ■ 使い方
+//   1. TradingView で 15分足チャートに適用
+//   2. アラート条件: "Any alert() function call" を選択
+//   3. Webhook URL に FastAPI の /webhook エンドポイントを設定
+//
+// ■ 時刻基準: セッションフィルターは UTC 基準
+// =====================================================
+
+//@version=5
+strategy("FX MTF SMC v2.3", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=2)
+
+// ── 入力パラメータ ─────────────────────────────────────────────
+i_pair           = input.string("USDJPY",  "通貨ペア",             options=["USDJPY","EURUSD","GBPJPY"])
+i_ema20_len      = input.int(20,           "4H EMA20 期間")
+i_ema50_len      = input.int(50,           "4H EMA50 期間")
+i_atr_len        = input.int(14,           "ATR期間")
+i_atr_avg        = input.int(20,           "ATR平均化日数")
+i_rsi_len        = input.int(14,           "RSI期間")
+i_rsi_ob         = input.float(65.0,       "RSI 買われすぎ")
+i_rsi_os         = input.float(35.0,       "RSI 売られすぎ")
+i_macd_fast      = input.int(12,           "MACD Fast")
+i_macd_slow      = input.int(26,           "MACD Slow")
+i_macd_sig       = input.int(9,            "MACD Signal")
+i_bb_len         = input.int(20,           "BB期間")
+i_bb_mult        = input.float(2.0,        "BB乗数")
+i_session_start  = input.int(7,            "セッション開始 UTC時")
+i_session_end    = input.int(21,           "セッション終了 UTC時")
+i_confluence_min = input.int(2,            "MTF合致最低スコア",    minval=1, maxval=5)
+i_swing_lookback = input.int(5,            "Swing ルックバック (1H)")
+i_swing_15m      = input.int(3,            "Swing ルックバック (15M) [NEW]")
+
+// ── [NEW v2.3] 追加パラメータ ──────────────────────────────────
+i_sweep_min_str  = input.float(0.3, "Sweep最小強度 ATR倍率 [NEW]",
+     minval=0.1, maxval=1.5, step=0.05,
+     tooltip="この倍率未満のSweepはノイズとして除外。小さいほど感度UP、大きいほど厳格。")
+i_sweep_timeout  = input.int(16, "Sweep待機タイムアウト 15Mバー数 [NEW]",
+     minval=4, maxval=48,
+     tooltip="Sweep検出後、この本数以内に15M MSBが出なければ無効化。16本=4時間。")
+i_fvg_mit_ratio  = input.float(0.5, "FVG使用済み閾値 充填率 [NEW]",
+     minval=0.1, maxval=1.0, step=0.1,
+     tooltip="FVGゾーンにこの比率以上価格が入ったら使用済みとしてリセット。0.5=50%。")
+
+
+// =====================================================
+// セクション1: 4時間足データ（方向 / OB / FVG）
+// =====================================================
+
+// 4H EMA（上位トレンド方向）
+ema20_4h      = request.security(syminfo.tickerid, "240", ta.ema(close, i_ema20_len))
+ema50_4h      = request.security(syminfo.tickerid, "240", ta.ema(close, i_ema50_len))
+trend_bullish = ema20_4h > ema50_4h
+trend_bearish = ema20_4h < ema50_4h
+
+// 4H OHLC
+high_4h   = request.security(syminfo.tickerid, "240", high)
+low_4h    = request.security(syminfo.tickerid, "240", low)
+open_4h   = request.security(syminfo.tickerid, "240", open)
+close_4h  = request.security(syminfo.tickerid, "240", close)
+
+// 4H ローソク特性
+body_4h     = math.abs(close_4h - open_4h)
+avg_body_4h = request.security(syminfo.tickerid, "240", ta.sma(math.abs(close - open), 20))
+is_big_4h   = body_4h > avg_body_4h * 1.5
+is_bull_4h  = close_4h > open_4h
+is_bear_4h  = close_4h < open_4h
+
+prev_high_4h  = request.security(syminfo.tickerid, "240", high[1])
+prev_low_4h   = request.security(syminfo.tickerid, "240", low[1])
+prev_close_4h = request.security(syminfo.tickerid, "240", close[1])
+prev_open_4h  = request.security(syminfo.tickerid, "240", open[1])
+
+// ── 4H Order Block + OBミティゲーション [UPDATED] ─────────────
+var float ob_4h_top    = na
+var float ob_4h_bottom = na
+var bool  ob_4h_bull   = false
+var bool  ob_4h_bear   = false
+var bool  ob_4h_valid  = false  // [NEW] 有効フラグ（ミティゲーション管理）
+
+// Bullish OB: 前が陰線 + 今が大きな陽線
+if is_big_4h and is_bull_4h and prev_close_4h < prev_open_4h
+    ob_4h_top    := prev_high_4h
+    ob_4h_bottom := prev_low_4h
+    ob_4h_bull   := true
+    ob_4h_bear   := false
+    ob_4h_valid  := true    // 新規OB → 有効化
+
+// Bearish OB: 前が陽線 + 今が大きな陰線
+if is_big_4h and is_bear_4h and prev_close_4h > prev_open_4h
+    ob_4h_top    := prev_high_4h
+    ob_4h_bottom := prev_low_4h
+    ob_4h_bull   := false
+    ob_4h_bear   := true
+    ob_4h_valid  := true    // 新規OB → 有効化
+
+// [NEW] OBミティゲーション: ゾーン中央を価格が超えたら使用済み
+ob_4h_mid = na(ob_4h_top) ? na : (ob_4h_top + ob_4h_bottom) / 2.0
+if ob_4h_valid and not na(ob_4h_mid)
+    // Bullish OB: 価格が中央以下に落ちたら「OBは機能しなかった」
+    if ob_4h_bull and close < ob_4h_mid
+        ob_4h_valid := false
+    // Bearish OB: 価格が中央以上に上がったら「OBは機能しなかった」
+    if ob_4h_bear and close > ob_4h_mid
+        ob_4h_valid := false
+
+ob_4h_zone_active = ob_4h_valid and not na(ob_4h_top) and
+     close >= ob_4h_bottom and close <= ob_4h_top
+
+// ── 4H FVG + FVGミティゲーション [UPDATED] ──────────────────────
+high_4h_2 = request.security(syminfo.tickerid, "240", high[2])
+low_4h_2  = request.security(syminfo.tickerid, "240", low[2])
+
+var float fvg_4h_top    = na
+var float fvg_4h_bottom = na
+var bool  fvg_4h_valid  = false   // [NEW]
+var bool  fvg_4h_is_bull = false  // [NEW] FVGの方向（充填方向の判定に使用）
+
+bullish_fvg_4h = low_4h > high_4h_2    // 上方向ギャップ（価格が上に跳んだ）
+bearish_fvg_4h = high_4h < low_4h_2   // 下方向ギャップ（価格が下に跳んだ）
+
+if bullish_fvg_4h
+    fvg_4h_top     := low_4h
+    fvg_4h_bottom  := high_4h_2
+    fvg_4h_valid   := true
+    fvg_4h_is_bull := true
+
+if bearish_fvg_4h
+    fvg_4h_top     := low_4h_2
+    fvg_4h_bottom  := high_4h
+    fvg_4h_valid   := true
+    fvg_4h_is_bull := false
+
+// [NEW] FVGミティゲーション: 充填率が閾値以上でゾーン無効化
+//   Bullish FVG → 価格が上から入り込む → fill率 = (top - close) / range
+//   Bearish FVG → 価格が下から入り込む → fill率 = (close - bottom) / range
+if fvg_4h_valid and not na(fvg_4h_top) and (fvg_4h_top - fvg_4h_bottom) > 0
+    _fvg_range = fvg_4h_top - fvg_4h_bottom
+    if fvg_4h_is_bull
+        _fill = (fvg_4h_top - close) / _fvg_range
+        if _fill >= i_fvg_mit_ratio
+            fvg_4h_valid := false
+    else
+        _fill = (close - fvg_4h_bottom) / _fvg_range
+        if _fill >= i_fvg_mit_ratio
+            fvg_4h_valid := false
+
+fvg_4h_zone_active = fvg_4h_valid and not na(fvg_4h_top) and
+     close >= fvg_4h_bottom and close <= fvg_4h_top
+
+fvg_4h_fill_ratio = fvg_4h_zone_active and (fvg_4h_top - fvg_4h_bottom) > 0 ?
+     (close - fvg_4h_bottom) / (fvg_4h_top - fvg_4h_bottom) : 0.0
+
+
+// =====================================================
+// セクション2: 1時間足データ（Sweep / BOS / ChoCH）
+// =====================================================
+
+high_1h  = request.security(syminfo.tickerid, "60", high)
+low_1h   = request.security(syminfo.tickerid, "60", low)
+close_1h = request.security(syminfo.tickerid, "60", close)
+
+// 1H Swing High/Low
+swing_high_1h = request.security(syminfo.tickerid, "60",
+     ta.pivothigh(high, i_swing_lookback, i_swing_lookback))
+swing_low_1h  = request.security(syminfo.tickerid, "60",
+     ta.pivotlow(low, i_swing_lookback, i_swing_lookback))
+
+var float last_swing_high_1h = na
+var float last_swing_low_1h  = na
+
+if not na(swing_high_1h)
+    last_swing_high_1h := swing_high_1h
+if not na(swing_low_1h)
+    last_swing_low_1h := swing_low_1h
+
+// ── 1H Liquidity Sweep + 強度フィルター [UPDATED] ───────────────
+var bool  liq_sweep_bull_1h = false
+var bool  liq_sweep_bear_1h = false
+var float sweep_strength    = 0.0
+
+atr_1h = request.security(syminfo.tickerid, "60", ta.atr(i_atr_len))
+
+// Bullish Sweep: 安値を一時下抜け → 終値がSwing Low上で回復
+if not na(last_swing_low_1h) and low_1h < last_swing_low_1h and close_1h > last_swing_low_1h
+    liq_sweep_bull_1h := true
+    sweep_strength    := nz(atr_1h) > 0 ?
+         math.abs(low_1h - last_swing_low_1h) / atr_1h : 0.0
+else
+    liq_sweep_bull_1h := false
+
+// Bearish Sweep: 高値を一時上抜け → 終値がSwing High下で回復
+if not na(last_swing_high_1h) and high_1h > last_swing_high_1h and close_1h < last_swing_high_1h
+    liq_sweep_bear_1h := true
+    sweep_strength    := nz(atr_1h) > 0 ?
+         math.abs(high_1h - last_swing_high_1h) / atr_1h : 0.0
+else
+    liq_sweep_bear_1h := false
+
+liq_sweep_1h       = liq_sweep_bull_1h or liq_sweep_bear_1h
+// [UPDATE] 強度フィルター適用済みSweep（mtf_confluence に使用）
+liq_sweep_qualified = liq_sweep_1h and sweep_strength >= i_sweep_min_str
+
+// ── 1H BOS (Break of Structure) ──────────────────────────────────
+var bool bos_1h_bull = false
+var bool bos_1h_bear = false
+
+if not na(last_swing_high_1h) and close_1h > last_swing_high_1h
+    bos_1h_bull := true
+else
+    bos_1h_bull := false
+
+if not na(last_swing_low_1h) and close_1h < last_swing_low_1h
+    bos_1h_bear := true
+else
+    bos_1h_bear := false
+
+bos_1h = bos_1h_bull or bos_1h_bear
+
+// ── 1H ChoCH (Change of Character) [NEW] ─────────────────────────
+// 直前のBOS方向と逆方向の構造ブレイク = トレンド転換シグナル
+// BOS継続 (順張り) と区別してスコア加算
+
+var int last_bos_dir = 0  // 1=直近が強気BOS, -1=直近が弱気BOS
+
+// ChoCH判定は「前バーのlast_bos_dir」と比較して方向転換を検出
+choch_1h_bull = bos_1h_bull and last_bos_dir[1] == -1  // 弱気構造 → 強気ブレイク
+choch_1h_bear = bos_1h_bear and last_bos_dir[1] == 1   // 強気構造 → 弱気ブレイク
+choch_1h      = choch_1h_bull or choch_1h_bear
+
+// last_bos_dir を現在バー末に更新（次バーのchoch判定で使用）
+if bos_1h_bull
+    last_bos_dir := 1
+if bos_1h_bear
+    last_bos_dir := -1
+
+
+// =====================================================
+// セクション3: 15分足インジケーター + Sweep→MSBステートマシン
+// =====================================================
+
+// ATR（15M）
+atr_14     = ta.atr(i_atr_len)
+atr_avg_20 = ta.sma(atr_14, i_atr_avg * (60 / 15))  // 20日平均
+atr_ratio  = nz(atr_avg_20) > 0 ? atr_14 / atr_avg_20 : 1.0
+
+// ボリンジャーバンド
+[bb_mid, bb_upper, bb_lower] = ta.bb(close, i_bb_len, i_bb_mult)
+bb_width   = (bb_upper - bb_lower) / bb_mid * 100
+bb_squeeze = bb_width < ta.sma(bb_width, 50) * 0.75
+
+// RSI
+rsi_14         = ta.rsi(close, i_rsi_len)
+rsi_oversold   = rsi_14 >= 30 and rsi_14 <= i_rsi_os
+rsi_overbought = rsi_14 >= i_rsi_ob and rsi_14 <= 70
+rsi_zone       = rsi_oversold ? 1 : rsi_overbought ? -1 : 0
+
+// MACD
+[macd_line, signal_line, macd_hist] = ta.macd(close, i_macd_fast, i_macd_slow, i_macd_sig)
+macd_cross_up   = ta.crossover(macd_hist, 0)
+macd_cross_down = ta.crossunder(macd_hist, 0)
+
+// ストキャスティクス
+stoch_k = ta.stoch(close, high, low, 14)
+stoch_d  = ta.sma(stoch_k, 3)
+
+// モメンタム（3本変化率）
+momentum_3bar = (close - close[3]) / close[3] * 100
+
+// 4H EMA乖離率
+close_vs_ema20_4h = nz(ema20_4h) > 0 ? (close - ema20_4h) / ema20_4h * 100 : 0.0
+close_vs_ema50_4h = nz(ema50_4h) > 0 ? (close - ema50_4h) / ema50_4h * 100 : 0.0
+
+// 15M高安レンジ
+high_low_range_15m = high - low
+
+// 直前ローソク実体比率
+prior_body              = math.abs(close[1] - open[1])
+prior_range             = high[1] - low[1]
+prior_candle_body_ratio = prior_range > 0 ? prior_body / prior_range : 0.5
+
+// 連続同方向バー
+var int consecutive_same_dir = 0
+if close > open
+    consecutive_same_dir := close[1] > open[1] ? consecutive_same_dir + 1 : 1
+else if close < open
+    consecutive_same_dir := close[1] < open[1] ? consecutive_same_dir + 1 : 1
+else
+    consecutive_same_dir := 0
+
+// ピボット近接
+daily_high    = request.security(syminfo.tickerid, "D", high[1])
+daily_low     = request.security(syminfo.tickerid, "D", low[1])
+daily_close_d = request.security(syminfo.tickerid, "D", close[1])
+pivot_point   = (daily_high + daily_low + daily_close_d) / 3
+pivot_proximity = math.abs(close - pivot_point)
+
+// OBゾーンまでの距離
+ob_4h_distance = (not ob_4h_valid or na(ob_4h_bottom)) ? 0.0 :
+     math.min(math.abs(close - ob_4h_top), math.abs(close - ob_4h_bottom))
+
+// ── 15M Swing High/Low 検出 [NEW] ────────────────────────────────
+// 1H Sweep後のMSB確認の参照ポイントとして使用
+swing_high_15m_raw = ta.pivothigh(high, i_swing_15m, i_swing_15m)
+swing_low_15m_raw  = ta.pivotlow(low,  i_swing_15m, i_swing_15m)
+
+var float last_swing_high_15m = na
+var float last_swing_low_15m  = na
+
+if not na(swing_high_15m_raw)
+    last_swing_high_15m := swing_high_15m_raw
+if not na(swing_low_15m_raw)
+    last_swing_low_15m := swing_low_15m_raw
+
+// ── Sweep → 15M MSBステートマシン [NEW] ──────────────────────────
+// 設計思想（逆張りエントリー最適化）:
+//   ① 1H Sweepが発生（強度フィルター通過）→ ペンディング状態へ
+//   ② 15Mチャートで構造ブレイク（MSB/ChoCH）を確認 → エントリートリガー
+//   ③ タイムアウト or 逆方向Sweep → ペンディングリセット
+//
+//   Bull Sweep: 安値刈り → 反転上昇 → 15M終値が参照高値を上抜け
+//   Bear Sweep: 高値刈り → 反転下落 → 15M終値が参照安値を下抜け
+
+// 1H Sweepのエッジ検出（1H期間の最初の15Mバーのみ反応）
+sweep_bull_started = liq_sweep_bull_1h and not liq_sweep_bull_1h[1]
+sweep_bear_started = liq_sweep_bear_1h and not liq_sweep_bear_1h[1]
+
+var bool  sweep_bull_pending = false   // Bull MSB待ち状態
+var bool  sweep_bear_pending = false   // Bear MSB待ち状態
+var int   sweep_pending_bars = 0       // 待機バー数カウンター
+var float msb_ref_high_15m  = na      // Bull Sweep時の参照高値（この上抜けでトリガー）
+var float msb_ref_low_15m   = na      // Bear Sweep時の参照安値（この下抜けでトリガー）
+
+// ① Sweep発生 → ペンディング開始（強度フィルター適用済みのみ）
+if sweep_bull_started and sweep_strength >= i_sweep_min_str
+    sweep_bull_pending := true
+    sweep_bear_pending := false
+    sweep_pending_bars := 0
+    msb_ref_high_15m  := last_swing_high_15m  // Sweep時点の15M高値を参照点に設定
+
+if sweep_bear_started and sweep_strength >= i_sweep_min_str
+    sweep_bear_pending := true
+    sweep_bull_pending := false
+    sweep_pending_bars := 0
+    msb_ref_low_15m   := last_swing_low_15m   // Sweep時点の15M安値を参照点に設定
+
+// ペンディングバーをカウント
+if sweep_bull_pending or sweep_bear_pending
+    sweep_pending_bars += 1
+
+// ③ タイムアウト → ペンディングリセット
+if sweep_pending_bars > i_sweep_timeout
+    sweep_bull_pending := false
+    sweep_bear_pending := false
+    sweep_pending_bars := 0
+    msb_ref_high_15m  := na
+    msb_ref_low_15m   := na
+
+// ② 15M MSB確認（エントリートリガー）
+// Bull: Sweepペンディング中 + 15M終値が参照高値を上抜け
+msb_15m_bull = sweep_bull_pending and not na(msb_ref_high_15m) and close > msb_ref_high_15m
+// Bear: Sweepペンディング中 + 15M終値が参照安値を下抜け
+msb_15m_bear = sweep_bear_pending and not na(msb_ref_low_15m)  and close < msb_ref_low_15m
+
+// MSB確認後はペンディングリセット（1シグナルのみ発火）
+if msb_15m_bull
+    sweep_bull_pending := false
+    sweep_pending_bars := 0
+if msb_15m_bear
+    sweep_bear_pending := false
+    sweep_pending_bars := 0
+
+
+// =====================================================
+// セクション4: MTF合致スコア計算（最大5点）
+// =====================================================
+
+mtf_confluence = 0
+
+if ob_4h_zone_active        // 4H OBゾーン内（ミティゲーション済みは除外）
+    mtf_confluence += 1
+if fvg_4h_zone_active       // 4H FVGゾーン内（充填率閾値以上は除外）
+    mtf_confluence += 1
+if liq_sweep_qualified      // [UPDATE] 強度フィルター通過済み1H Sweep
+    mtf_confluence += 1
+if choch_1h                 // ChoCH優先（転換 = BOS排他）
+    mtf_confluence += 1
+else if bos_1h              // ChoCH不在時のみBOS加点
+    mtf_confluence += 1
+
+
+// =====================================================
+// セクション5: セッションフィルター
+// =====================================================
+
+utc_hour       = hour(time, "UTC")
+in_session     = utc_hour >= i_session_start and utc_hour < i_session_end
+is_friday_late = dayofweek == dayofweek.friday and utc_hour >= 20
+
+
+// =====================================================
+// セクション6: エントリー条件
+// =====================================================
+
+vol_ok         = atr_14 > atr_avg_20 * 0.8 and not bb_squeeze
+momentum_long  = macd_cross_up   or rsi_oversold
+momentum_short = macd_cross_down or rsi_overbought
+
+// === ロングエントリー ===
+// 4H上位トレンド方向 + 1H Bullish Sweep後15M MSB確認 → 逆張りエントリー精度向上
+long_condition =
+     trend_bullish                         and  // 【必須】4H方向フィルター
+     msb_15m_bull                          and  // 【必須・NEW】15M MSBトリガー確認
+     mtf_confluence >= i_confluence_min    and  // 【必須】MTF合致スコア
+     vol_ok                                and  // 【必須】ボラティリティ確認
+     in_session and not is_friday_late     and  // 【必須】セッションフィルター
+     momentum_long                              // 【推奨】モメンタム確認
+
+// === ショートエントリー ===
+short_condition =
+     trend_bearish                         and
+     msb_15m_bear                          and  // 【必須・NEW】
+     mtf_confluence >= i_confluence_min    and
+     vol_ok                                and
+     in_session and not is_friday_late     and
+     momentum_short
+
+
+// =====================================================
+// セクション7: JSON生成関数 + アラート発火 [NEW]
+// =====================================================
+
+// f_build_json: アラートWebhook用JSON文字列を生成
+// 引数:
+//   dir        - "long" or "short"
+//   msb_conf   - 15M MSB確認フラグ (bool)
+//   choch_flag - ChoCH検出フラグ (bool)
+// ※ グローバル変数に直接アクセス（Pine Script v5仕様）
+f_build_json(dir, msb_conf, choch_flag) =>
+    _mc = macd_cross_up ? 1 : (macd_cross_down ? -1 : 0)
+    _p1 = '{"pair":"' + i_pair + '","direction":"' + dir + '","msb_15m_confirmed":' + str.tostring(msb_conf) + ',"choch_1h":' + str.tostring(choch_flag)
+    _p2 = ',"fvg_4h_zone_active":' + str.tostring(fvg_4h_zone_active) + ',"ob_4h_zone_active":' + str.tostring(ob_4h_zone_active) + ',"liq_sweep_1h":' + str.tostring(liq_sweep_1h) + ',"liq_sweep_qualified":' + str.tostring(liq_sweep_qualified) + ',"bos_1h":' + str.tostring(bos_1h)
+    _p3 = ',"mtf_confluence":' + str.tostring(mtf_confluence) + ',"atr":' + str.tostring(math.round(atr_14, 5)) + ',"close":' + str.tostring(math.round(close, 5)) + ',"atr_ratio":' + str.tostring(math.round(atr_ratio, 4)) + ',"bb_width":' + str.tostring(math.round(bb_width, 4))
+    _p4 = ',"rsi_14":' + str.tostring(math.round(rsi_14, 2)) + ',"rsi_zone":' + str.tostring(rsi_zone) + ',"macd_histogram":' + str.tostring(math.round(macd_hist, 6)) + ',"macd_signal_cross":' + str.tostring(_mc)
+    _p5 = ',"stoch_k":' + str.tostring(math.round(stoch_k, 2)) + ',"stoch_d":' + str.tostring(math.round(stoch_d, 2)) + ',"momentum_3bar":' + str.tostring(math.round(momentum_3bar, 4))
+    _p6 = ',"close_vs_ema20_4h":' + str.tostring(math.round(close_vs_ema20_4h, 4)) + ',"close_vs_ema50_4h":' + str.tostring(math.round(close_vs_ema50_4h, 4)) + ',"high_low_range_15m":' + str.tostring(math.round(high_low_range_15m, 5))
+    _p7 = ',"ob_4h_distance_pips":' + str.tostring(math.round(ob_4h_distance, 4)) + ',"fvg_4h_fill_ratio":' + str.tostring(math.round(fvg_4h_fill_ratio, 4)) + ',"liq_sweep_strength":' + str.tostring(math.round(sweep_strength, 4))
+    _p8 = ',"prior_candle_body_ratio":' + str.tostring(math.round(prior_candle_body_ratio, 4)) + ',"consecutive_same_dir":' + str.tostring(consecutive_same_dir) + ',"pivot_proximity":' + str.tostring(math.round(pivot_proximity, 4)) + ',"sweep_pending_bars":' + str.tostring(sweep_pending_bars)
+    _p1 + _p2 + _p3 + _p4 + _p5 + _p6 + _p7 + _p8 + '}'
+
+// アラート発火
+if long_condition
+    alert(f_build_json("long", msb_15m_bull, choch_1h_bull), alert.freq_once_per_bar)
+
+if short_condition
+    alert(f_build_json("short", msb_15m_bear, choch_1h_bear), alert.freq_once_per_bar)
+
+
+// =====================================================
+// セクション8: ビジュアル表示
+// =====================================================
+
+// 4H EMA
+plot(ema20_4h, "4H EMA20", color=color.new(color.blue, 30), linewidth=2)
+plot(ema50_4h, "4H EMA50", color=color.new(color.red,  30), linewidth=2)
+
+// OBゾーン（有効なもののみ表示）
+ob_display_color = ob_4h_bull ? color.new(color.green, 80) :
+     ob_4h_bear ? color.new(color.red, 80) : na
+bgcolor(ob_4h_zone_active ? ob_display_color : na, title="4H OB Zone (Active)")
+
+// FVGゾーン（有効なもののみ表示）
+bgcolor(fvg_4h_zone_active ? color.new(color.yellow, 85) : na, title="4H FVG Zone (Active)")
+
+// [NEW] Sweep待機状態の背景表示（淡い色でMSB待ちを可視化）
+bgcolor(sweep_bull_pending ? color.new(color.lime,  95) :
+     sweep_bear_pending ? color.new(color.red, 95) : na,
+     title="Sweep Pending (MSB Waiting)")
+
+// エントリーシグナル
+plotshape(long_condition,  style=shape.triangleup,
+     location=location.belowbar, color=color.green, size=size.normal, title="Long Signal")
+plotshape(short_condition, style=shape.triangledown,
+     location=location.abovebar, color=color.red,   size=size.normal, title="Short Signal")
+
+// [UPDATE] Sweep マーカー（強度フィルター通過済みのみ強調）
+plotshape(liq_sweep_bull_1h and sweep_strength >= i_sweep_min_str,
+     style=shape.diamond, location=location.belowbar,
+     color=color.new(color.lime, 20), size=size.small, title="1H Bull Sweep (Qualified)")
+plotshape(liq_sweep_bear_1h and sweep_strength >= i_sweep_min_str,
+     style=shape.diamond, location=location.abovebar,
+     color=color.new(color.fuchsia, 20), size=size.small, title="1H Bear Sweep (Qualified)")
+// 強度不足のSweep（フィルターで除外されたもの）
+plotshape(liq_sweep_bull_1h and sweep_strength < i_sweep_min_str,
+     style=shape.diamond, location=location.belowbar,
+     color=color.new(color.lime, 70), size=size.tiny, title="1H Bull Sweep (Weak)")
+plotshape(liq_sweep_bear_1h and sweep_strength < i_sweep_min_str,
+     style=shape.diamond, location=location.abovebar,
+     color=color.new(color.fuchsia, 70), size=size.tiny, title="1H Bear Sweep (Weak)")
+
+// [NEW] 15M MSBマーカー
+plotshape(msb_15m_bull, style=shape.arrowup,   location=location.belowbar,
+     color=color.new(color.aqua, 10),   size=size.small, title="15M MSB Bull (Trigger)")
+plotshape(msb_15m_bear, style=shape.arrowdown, location=location.abovebar,
+     color=color.new(color.orange, 10), size=size.small, title="15M MSB Bear (Trigger)")
+
+// BOS マーカー（ChoCHと分離表示）
+plotshape(bos_1h_bull and not choch_1h_bull,
+     style=shape.cross, location=location.abovebar,
+     color=color.new(color.teal, 30), size=size.tiny, title="1H BOS Bull (Continuation)")
+plotshape(bos_1h_bear and not choch_1h_bear,
+     style=shape.cross, location=location.belowbar,
+     color=color.new(color.orange, 30), size=size.tiny, title="1H BOS Bear (Continuation)")
+
+// [NEW] ChoCHマーカー（転換シグナル = より目立つ表示）
+plotshape(choch_1h_bull, style=shape.xcross, location=location.abovebar,
+     color=color.new(color.green, 0), size=size.small, title="1H ChoCH Bull (Reversal)")
+plotshape(choch_1h_bear, style=shape.xcross, location=location.belowbar,
+     color=color.new(color.red, 0),   size=size.small, title="1H ChoCH Bear (Reversal)")
+
+// MTFスコア + 状態ラベル（最終バーのみ）
+var label lbl = na
+if barstate.islast
+    label.delete(lbl)
+    _pb = str.tostring(sweep_pending_bars)
+    _msb_s = sweep_bull_pending ?
+         ("Bull(" + _pb + ")") :
+         (sweep_bear_pending ?
+         ("Bear(" + _pb + ")") : "-")
+    _sw_v = str.tostring(math.round(sweep_strength, 2))
+    _sw_s = liq_sweep_qualified ?
+         ("OK " + _sw_v + "x") : ("NG " + _sw_v + "x")
+    _txt = "MTF:" + str.tostring(mtf_confluence) + "/5" +
+         "\nATR:" + str.tostring(math.round(atr_14, 5)) +
+         "\nRSI:" + str.tostring(math.round(rsi_14, 1)) +
+         "\nSweep:" + _sw_s +
+         "\nMSB:" + _msb_s +
+         "\nFVG:" + (fvg_4h_valid ? "OK" : "NG") +
+         "\nOB:" + (ob_4h_valid ? "OK" : "NG") +
+         "\nSes:" + (in_session ? "ON" : "OFF")
+    _lc = mtf_confluence >= i_confluence_min ?
+         color.green : color.gray
+    lbl := label.new(bar_index, high, _txt,
+         color=_lc, textcolor=color.white,
+         style=label.style_label_down, size=size.normal)
+
+// セッション背景
+bgcolor(in_session ? color.new(color.blue, 95) : na, title="Active Session")

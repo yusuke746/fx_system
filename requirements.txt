@@ -1,0 +1,39 @@
+# FX Auto-Trading System v2.2
+
+# Web server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# MT5
+MetaTrader5==5.0.5640
+
+# Machine Learning
+lightgbm==4.5.0
+scikit-learn==1.6.1
+joblib==1.4.2
+numpy==2.2.3
+pandas==2.2.3
+
+# LLM
+openai==1.68.0
+
+# Config / Env
+pydantic==2.10.6
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+
+# HTTP / XML
+requests==2.32.3
+httpx==0.28.1
+
+# Discord notifications
+aiohttp==3.11.12
+
+# Scheduling
+apscheduler==3.11.0
+
+# Logging
+loguru==0.7.3
+
+# Security
+cryptography==44.0.0

@@ -1,0 +1,25 @@
+# === シークレット ===
+.env
+.env.*
+!.env.example
+
+# === ローカルDB・ログ ===
+*.db
+*.db-journal
+logs/
+*.log
+
+# === モデルファイル ===
+models/*.pkl
+models/*.txt
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# === Windows ===
+Thumbs.db
+desktop.ini

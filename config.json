@@ -1,0 +1,44 @@
+{
+  "system": {
+    "version": "2.2",
+    "pairs": ["USDJPY", "EURUSD", "GBPJPY"],
+    "demo_mode": true
+  },
+  "llm": {
+    "model_instant": "gpt-5.2-instant",
+    "model_thinking": "gpt-5.2-thinking",
+    "llm_enabled": true,
+    "atr_threshold_multiplier": 1.5,
+    "cache_ttl_normal_minutes": 60,
+    "cache_ttl_low_power_minutes": 90,
+    "low_power_consecutive_skips": 3
+  },
+  "risk": {
+    "max_risk_per_trade_pct": 2.0,
+    "max_daily_drawdown_pct": 10.0,
+    "max_total_exposure_pct": 10.0,
+    "max_positions": 5,
+    "max_usd_exposure": 4,
+    "max_jpy_exposure": 2,
+    "sl_multiplier": 1.5,
+    "tp_multiplier": 2.5,
+    "sl_min_pips": 15,
+    "sl_max_pips": 35,
+    "scale_out_step1_ratio": 0.50,
+    "scale_out_step2_ratio": 0.25,
+    "trailing_atr_multiplier": 0.8,
+    "doten_interval_seconds": 3600
+  },
+  "optimization": {
+    "auto_optimize": true,
+    "optimize_window_days": 28,
+    "validate_window_days": 14,
+    "min_sample_count": 30,
+    "max_change_ratio": 0.20,
+    "rollback_winrate_threshold": -0.10
+  },
+  "broker": {
+    "spread_assumption_pips": 1.5,
+    "commission_per_lot": 0
+  }
+}
