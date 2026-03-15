@@ -98,6 +98,13 @@ async def health():
     }
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """ブラウザの自動リクエストを 204 で返してログノイズを抑制。"""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
 def _record_sig_failure(client_ip: str) -> None:
     """署名不一致を記録し、閾値を超えたら通知する。"""
     now = time.time()
