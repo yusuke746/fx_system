@@ -51,6 +51,25 @@ class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
+def _normalize_trading_config(config: dict) -> dict:
+    """段階的リファクタリング中の設定差分を吸収する。"""
+    risk = config.setdefault("risk", {})
+
+    # 新しいダイナミック・エグジット戦略の既定値。
+    risk.setdefault("exit_prob_threshold", 0.35)
+    risk.setdefault("time_decay_minutes", 60)
+    risk.setdefault("time_decay_min_profit_atr", 0.5)
+
+    llm = config.setdefault("llm", {})
+    llm.setdefault("model_diff", llm.get("model_instant", "gpt-5.2"))
+    llm.setdefault("reasoning_effort_diff", llm.get("reasoning_effort_instant", "low"))
+    llm.setdefault("hybrid_enabled", True)
+    llm.setdefault("news_importance_escalation_threshold", 0.65)
+    llm.setdefault("feature_news_importance_threshold", 0.55)
+
+    return config
+
+
 def load_trading_config(config_path: str | None = None) -> dict:
     """
     config.json から動的トレーディングパラメータを読み込む。
@@ -68,7 +87,7 @@ def load_trading_config(config_path: str | None = None) -> dict:
                 f"config.json が見つかりません: requested={path} fallback={fallback_path}"
             )
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        return _normalize_trading_config(json.load(f))
 
 
 def save_trading_config(config: dict, config_path: str | None = None) -> None:

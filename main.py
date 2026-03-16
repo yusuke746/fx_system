@@ -5,7 +5,7 @@ FX自動売買システム v2.2 — メインオーケストレーター
   ① TradingView Webhook受信（MTF SMC + テクニカル条件成立時のみ）
   ② Calendar Veto確認（Python IFルール・0ms）
   ③ GPT-5.2キャッシュ読込（メモリから即時・0ms）
-    ④ LightGBM推論（36特徴量・1ms以下）
+    ④ LightGBM推論（35特徴量・1ms以下）
   ⑤ ドテン判定 → インターバル確認
   ⑥ 高速連続発注 / MT5 ThreadPoolExecutor(max_workers=1)
 
@@ -24,6 +24,7 @@ import asyncio
 import signal
 import sys
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -65,7 +66,7 @@ from llm.llm_client import DiffDetector, LLMClient
 from ml.lgbm_model import LGBMPredictor, build_features
 from veto.calendar_veto import CalendarVeto
 from webhook.server import app as fastapi_app
-from webhook.signal_queue import signal_queue
+from webhook.signal_queue import get_queue
 
 
 class Orchestrator:
@@ -97,7 +98,10 @@ class Orchestrator:
         self._calendar_veto = CalendarVeto()
 
         # LLM
-        self._diff_detector = DiffDetector()
+        self._diff_detectors = {
+            pair: DiffDetector()
+            for pair in self._config["system"]["pairs"]
+        }
         self._llm_client = LLMClient(
             api_key=self._settings.openai_api_key.get_secret_value(),
             db_conn=self._db_conn,
@@ -107,7 +111,7 @@ class Orchestrator:
         self._predictor = LGBMPredictor(model_dir=self._settings.model_dir)
 
         # ポジション管理
-        self._position_manager = PositionManager(self._broker, self._notifier)
+        self._position_manager = PositionManager(self._broker, self._notifier, self._db_conn)
 
         # リスク設定
         self._risk_config = load_risk_config(self._config)
@@ -229,6 +233,7 @@ class Orchestrator:
     # ── メインシグナル処理ループ ──────────────────
     async def _signal_processing_loop(self) -> None:
         """Webhook キューからシグナルを受け取って処理するメインループ。"""
+        signal_queue = get_queue()
         while self._running:
             try:
                 payload = await asyncio.wait_for(signal_queue.get(), timeout=1.0)
@@ -279,8 +284,13 @@ class Orchestrator:
             return
 
         # ③ GPT-5.2 キャッシュ読込（Veto Layer B）
-        cached = self._diff_detector.cached_result
-        sentiment_score = cached.sentiment_score if cached else 0.0
+        detector = self._diff_detectors.setdefault(pair, DiffDetector())
+        cached = detector.cached_result
+        llm_cfg = self._config.get("llm", {})
+        feature_threshold = float(llm_cfg.get("feature_news_importance_threshold", 0.55))
+        importance = cached.news_importance_score if cached else 0.0
+        sentiment_score = cached.sentiment_score if cached and importance >= feature_threshold else 0.0
+        calendar_risk_score = 2 if (cached and cached.unexpected_veto) else (1 if importance >= feature_threshold else 0)
         if cached and cached.unexpected_veto:
             logger.info("Signal vetoed by GPT unexpected_veto flag")
             insert_signal(self._db_conn, {
@@ -341,6 +351,9 @@ class Orchestrator:
                 "close_vs_ema20_4h": payload.get("close_vs_ema20_4h", 0.0),
                 "close_vs_ema50_4h": payload.get("close_vs_ema50_4h", 0.0),
                 "high_low_range_15m": payload.get("high_low_range_15m", 0.0),
+                "trend_direction": payload.get("trend_direction", 0),
+                "momentum_long": payload.get("momentum_long", 0),
+                "momentum_short": payload.get("momentum_short", 0),
                 "macd_histogram": payload.get("macd_histogram", 0.0),
                 "macd_signal_cross": payload.get("macd_signal_cross", 0),
                 "rsi_14": payload.get("rsi_14", 50.0),
@@ -361,7 +374,7 @@ class Orchestrator:
                 "day_of_week": now.weekday(),
                 "open_positions_count": len(self._position_manager.positions),
                 "max_dd_24h": 0.0,
-                "calendar_risk_score": 0,
+                "calendar_risk_score": calendar_risk_score,
                 "sentiment_score": sentiment_score,
             })
         except Exception as e:
@@ -372,7 +385,7 @@ class Orchestrator:
             market_data=market_data,
             position_data=position_data,
             sentiment_score=sentiment_score,
-            calendar_risk_score=0,
+            calendar_risk_score=calendar_risk_score,
         )
         prediction = self._predictor.predict(pair, features)
         if prediction is None:
@@ -386,6 +399,14 @@ class Orchestrator:
                 "veto_reason": "model_unavailable",
             })
             return
+
+        # 同一ペア保有中のポジションには、最新のLightGBM予測を都度反映する。
+        self._position_manager.update_pair_prediction(
+            pair,
+            prediction.prob_up,
+            prediction.prob_flat,
+            prediction.prob_down,
+        )
 
         # シグナル記録
         insert_signal(self._db_conn, {
@@ -429,7 +450,12 @@ class Orchestrator:
 
                 # ドテン実行
                 config = get_trading_config()
-                sl_pips, tp_pips = calc_sl_tp_pips(atr, pair, config)
+                sl_pips, tp_pips = calc_sl_tp_pips(
+                    atr,
+                    pair,
+                    config,
+                    ob_4h_distance_pips=payload.get("ob_4h_distance_pips", 0.0),
+                )
                 lot = calc_lot_size(
                     self._broker.get_account_balance(),
                     sl_pips, pair, self._risk_config,
@@ -437,10 +463,39 @@ class Orchestrator:
                 sl_price, tp_price = self._calc_sl_tp_price(
                     pair, prediction.direction, close_price, sl_pips, tp_pips,
                 )
-                await self._position_manager.execute_doten(
+                ok, new_ticket = await self._position_manager.execute_doten(
                     pair, pos.ticket, prediction.direction,
-                    lot, sl_price, tp_price, atr, close_price,
+                    lot, sl_price, tp_price, close_price,
                 )
+                if ok and new_ticket:
+                    trade_id = insert_trade(self._db_conn, {
+                        "pair": pair,
+                        "direction": prediction.direction,
+                        "open_time": now_utc(),
+                        "open_price": close_price,
+                        "volume": lot,
+                        "sl_price": sl_price,
+                        "tp_price": tp_price,
+                        "mt5_ticket": new_ticket,
+                    })
+                    self._position_manager.register_position(ManagedPosition(
+                        trade_id=trade_id,
+                        ticket=new_ticket,
+                        pair=pair,
+                        direction=prediction.direction,
+                        volume=lot,
+                        open_price=close_price,
+                        sl_price=sl_price,
+                        tp_price=tp_price,
+                        target_tp_price=tp_price,
+                        target_tp_pips=tp_pips,
+                        open_time_utc=now_utc(),
+                        atr_at_entry=atr,
+                        prob_up=prediction.prob_up,
+                        prob_flat=prediction.prob_flat,
+                        prob_down=prediction.prob_down,
+                        last_prediction_at_utc=now_utc(),
+                    ))
                 return
             else:
                 logger.info(f"Same direction already held for {pair}")
@@ -469,7 +524,12 @@ class Orchestrator:
 
         # 発注
         config = get_trading_config()
-        sl_pips, tp_pips = calc_sl_tp_pips(atr, pair, config)
+        sl_pips, tp_pips = calc_sl_tp_pips(
+            atr,
+            pair,
+            config,
+            ob_4h_distance_pips=payload.get("ob_4h_distance_pips", 0.0),
+        )
         lot = calc_lot_size(
             self._broker.get_account_balance(),
             sl_pips, pair, self._risk_config,
@@ -483,19 +543,6 @@ class Orchestrator:
         )
 
         if ok and ticket:
-            managed = ManagedPosition(
-                ticket=ticket,
-                pair=pair,
-                direction=prediction.direction,
-                volume=lot,
-                open_price=close_price,
-                sl_price=sl_price,
-                tp_price=tp_price,
-                open_time_utc=now_utc(),
-                atr_at_entry=atr,
-            )
-            self._position_manager.register_position(managed)
-
             trade_record = {
                 "pair": pair,
                 "direction": prediction.direction,
@@ -506,7 +553,27 @@ class Orchestrator:
                 "tp_price": tp_price,
                 "mt5_ticket": ticket,
             }
-            insert_trade(self._db_conn, trade_record)
+            trade_id = insert_trade(self._db_conn, trade_record)
+
+            managed = ManagedPosition(
+                trade_id=trade_id,
+                ticket=ticket,
+                pair=pair,
+                direction=prediction.direction,
+                volume=lot,
+                open_price=close_price,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                target_tp_price=tp_price,
+                target_tp_pips=tp_pips,
+                open_time_utc=now_utc(),
+                atr_at_entry=atr,
+                prob_up=prediction.prob_up,
+                prob_flat=prediction.prob_flat,
+                prob_down=prediction.prob_down,
+                last_prediction_at_utc=now_utc(),
+            )
+            self._position_manager.register_position(managed)
 
             await self._notifier.send(
                 f"新規エントリー: {pair} {prediction.direction}\n"
@@ -538,6 +605,26 @@ class Orchestrator:
         return sl_price, tp_price
 
     # ── バックグラウンドタスク ──────────────────
+    def _build_pair_news_articles(self, pair: str) -> list[dict]:
+        """Calendar Vetoキャッシュをニュース記事形式に変換する。"""
+        now = now_utc()
+        recent_cutoff = now - timedelta(hours=2)
+        future_cutoff = now + timedelta(hours=12)
+        pair_currencies = {pair[:3], pair[3:]}
+
+        pair_events = [
+            ev for ev in self._calendar_veto.events
+            if ev["currency"] in pair_currencies and recent_cutoff <= ev["datetime_utc"] <= future_cutoff
+        ]
+
+        return [
+            {
+                "title": f"{ev['currency']} {ev['title']}",
+                "summary": f"High impact at {format_jst(ev['datetime_utc'])}",
+            }
+            for ev in pair_events[:10]
+        ]
+
     async def _diff_detection_task(self) -> None:
         """15分ごとの差分検知タスク。"""
         try:
@@ -551,9 +638,15 @@ class Orchestrator:
 
             for pair in config["system"]["pairs"]:
                 veto_active, _ = self._calendar_veto.is_veto_active(pair)
+                detector = self._diff_detectors.setdefault(pair, DiffDetector())
+                news_articles = self._build_pair_news_articles(pair)
+                market_context = (
+                    f"pair={pair}, high_impact_events_nearby={len(news_articles)}, "
+                    f"mode={'low_power' if detector.is_low_power else 'normal'}"
+                )
 
-                should_call, reason = self._diff_detector.run_diff_check(
-                    news_articles=[],  # ニュースフィード実装時に結合
+                should_call, reason = detector.run_diff_check(
+                    news_articles=news_articles,
                     current_atr=0.0,   # MT5からリアルタイム取得時に結合
                     avg_atr_20d=0.0,
                     calendar_veto_active=veto_active,
@@ -561,14 +654,14 @@ class Orchestrator:
 
                 if should_call:
                     try:
-                        result = await self._llm_client.analyze_sentiment(
+                        result = await self._llm_client.analyze_sentiment_hybrid(
                             pair=pair,
-                            news_articles=[],
-                            market_context="",
+                            news_articles=news_articles,
+                            market_context=market_context,
                             reason=reason,
                         )
-                        self._diff_detector._cached_result = result
-                        self._diff_detector._last_call_time = now_utc()
+                        detector._cached_result = result
+                        detector._last_call_time = now_utc()
                     except Exception as e:
                         # モデル未提供/アクセス不可時は設定を変えず、通知のみ（スロットリング）
                         msg = str(e)

@@ -16,7 +16,7 @@ MT5 ブローカー連携モジュール
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from loguru import logger
 
@@ -148,6 +148,60 @@ class MT5Broker:
             })
 
         return result
+
+    def get_recent_closed_position_info(
+        self,
+        ticket: int,
+        lookback_hours: int = 48,
+    ) -> dict | None:
+        """
+        直近の約定履歴から、指定ポジションの最終決済情報を取得する。
+
+        MT5側でTP/SLが先に約定した場合でも、ローカル管理状態を同期するために使う。
+        """
+        if not MT5_AVAILABLE:
+            return None
+
+        end = now_utc()
+        start = end - timedelta(hours=lookback_hours)
+
+        try:
+            deals = mt5.history_deals_get(
+                utc_to_mt5_server(start),
+                utc_to_mt5_server(end),
+                position=ticket,
+            )
+        except TypeError:
+            # 一部のMT5 Python wrapperは position 引数非対応のため全件から絞り込む。
+            deals = mt5.history_deals_get(
+                utc_to_mt5_server(start),
+                utc_to_mt5_server(end),
+            )
+
+        if not deals:
+            return None
+
+        closing_deals = []
+        deal_entry_out = getattr(mt5, "DEAL_ENTRY_OUT", 1)
+        deal_entry_out_by = getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)
+        for deal in deals:
+            if getattr(deal, "position_id", None) != ticket:
+                continue
+            if getattr(deal, "entry", None) in (deal_entry_out, deal_entry_out_by):
+                closing_deals.append(deal)
+
+        if not closing_deals:
+            return None
+
+        close_deal = max(closing_deals, key=lambda d: getattr(d, "time", 0))
+        return {
+            "ticket": ticket,
+            "close_price": float(getattr(close_deal, "price", 0.0) or 0.0),
+            "profit": float(getattr(close_deal, "profit", 0.0) or 0.0),
+            "volume": float(getattr(close_deal, "volume", 0.0) or 0.0),
+            "close_time_utc": mt5_server_to_utc(datetime.fromtimestamp(int(close_deal.time))),
+            "comment": str(getattr(close_deal, "comment", "") or ""),
+        }
 
     # ── 発注（シリアル実行） ──────────────────────
     async def open_position_async(

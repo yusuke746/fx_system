@@ -11,7 +11,7 @@ FOMC・雇用統計等の前後30分をブロックする。
   - Discord 通知: 表示基準（JST）で表示する。
 """
 
-import xml.etree.ElementTree as ET
+import importlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,6 +20,8 @@ import requests
 from loguru import logger
 
 from core.time_manager import UTC, now_utc, is_within_buffer, format_jst
+
+ET = importlib.import_module("defusedxml.ElementTree")
 
 FOREX_FACTORY_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
 FOREX_FACTORY_NEXT_URL = "https://nfs.faireconomy.media/ff_calendar_nextweek.xml"

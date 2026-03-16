@@ -11,21 +11,23 @@ FastAPI Webhook サーバー
   - ログ・Discord通知: 表示基準（JST）
 """
 
-import time
-from collections import defaultdict
+import hmac
 
+from cachetools import TTLCache
 from fastapi import FastAPI, Request, HTTPException
 from loguru import logger
 
 from config.settings import get_settings
 from core.time_manager import now_utc, format_jst
+from webhook.signal_queue import get_queue
 
 app = FastAPI(title="FX Auto-Trading Webhook", version="2.2")
 
-# 署名不一致のカウンター（IP別）
-_failed_sig_counts: dict[str, list[float]] = defaultdict(list)
+# 認証失敗のカウンター（IP別）
 _FAIL_WINDOW_SEC = 300  # 5分
 _FAIL_THRESHOLD = 3
+_failed_token_counts: TTLCache = TTLCache(maxsize=1000, ttl=_FAIL_WINDOW_SEC)
+_blocked_ip_cache: TTLCache = TTLCache(maxsize=1000, ttl=_FAIL_WINDOW_SEC)
 
 
 @app.post("/webhook")
@@ -46,6 +48,11 @@ async def receive_webhook(request: Request):
         "close": 149.85
     }
     """
+    client_ip = _get_client_ip(request)
+    if _blocked_ip_cache.get(client_ip):
+        logger.warning(f"Blocked webhook request from {client_ip}")
+        raise HTTPException(status_code=429, detail="Too many invalid auth attempts")
+
     settings = get_settings()
 
     try:
@@ -56,9 +63,8 @@ async def receive_webhook(request: Request):
     # 共有トークン検証（JSON内）
     secret = settings.webhook_secret.get_secret_value()
     provided_token = str(payload.get("webhook_token", ""))
-    if secret and provided_token != secret:
-        client_ip = request.client.host if request.client else "unknown"
-        _record_sig_failure(client_ip)
+    if secret and not hmac.compare_digest(provided_token, secret):
+        _record_auth_failure(client_ip)
         logger.warning(f"Webhook token verification failed from {client_ip}")
         raise HTTPException(status_code=429, detail="Webhook token verification failed")
 
@@ -82,7 +88,7 @@ async def receive_webhook(request: Request):
     )
 
     # Orchestrator のキューに投入（main.py 側で設定）
-    from webhook.signal_queue import signal_queue
+    signal_queue = get_queue()
     await signal_queue.put(payload)
 
     return {"status": "ok", "received_at": payload["received_at_utc"]}
@@ -105,17 +111,26 @@ async def favicon():
     return Response(status_code=204)
 
 
-def _record_sig_failure(client_ip: str) -> None:
-    """署名不一致を記録し、閾値を超えたら通知する。"""
-    now = time.time()
-    _failed_sig_counts[client_ip] = [
-        t for t in _failed_sig_counts[client_ip]
-        if now - t < _FAIL_WINDOW_SEC
-    ]
-    _failed_sig_counts[client_ip].append(now)
+def _get_client_ip(request: Request) -> str:
+    """プロキシ環境を考慮してクライアントIPを取得する。"""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        first_ip = xff.split(",")[0].strip()
+        if first_ip:
+            return first_ip
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
 
-    if len(_failed_sig_counts[client_ip]) >= _FAIL_THRESHOLD:
+
+def _record_auth_failure(client_ip: str) -> None:
+    """トークン認証失敗を記録し、閾値超過で一時ブロックする。"""
+    fail_count = int(_failed_token_counts.get(client_ip, 0)) + 1
+    _failed_token_counts[client_ip] = fail_count
+
+    if fail_count >= _FAIL_THRESHOLD:
+        _blocked_ip_cache[client_ip] = True
         logger.critical(
-            f"Webhook signature failure threshold exceeded: "
-            f"{client_ip} ({len(_failed_sig_counts[client_ip])} failures in {_FAIL_WINDOW_SEC}s)"
+            f"Webhook auth failure threshold exceeded: "
+            f"{client_ip} ({fail_count} failures in {_FAIL_WINDOW_SEC}s)"
         )

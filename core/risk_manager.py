@@ -64,6 +64,10 @@ def calc_lot_size(
       → 許容損失 = 1,000,000 × 0.02 = 20,000円
       → lot = 20,000 / (20 × 100 × 100) = 0.10 lot
     """
+    if sl_pips <= 0:
+        logger.error(f"Invalid sl_pips={sl_pips}. Defaulting to minimum lot size 0.01")
+        return 0.01
+
     max_loss_jpy = account_balance * (risk_config.MAX_RISK_PER_TRADE_PCT / 100)
     pip_value_per_mini_lot = _PIP_VALUES.get(pair, 100)
     lot = max_loss_jpy / (sl_pips * pip_value_per_mini_lot * 100)
@@ -132,16 +136,24 @@ def check_daily_drawdown(
     return allowed, drawdown_pct
 
 
-def calc_sl_tp_pips(atr: float, pair: str, trading_config: dict) -> tuple[float, float]:
+def calc_sl_tp_pips(
+    atr: float,
+    pair: str,
+    trading_config: dict,
+    ob_4h_distance_pips: float | None = None,
+) -> tuple[float, float]:
     """
-    ATR からSL/TP（pips）を計算する。min/max でキャップ。
+    ATR と構造距離からSL/TP（pips）を計算する。
+
+    - SL は従来どおり ATR ベース
+    - TP は Pine から渡された ob_4h_distance_pips を優先
+    - 構造距離が無効な場合のみ、SL比ベースの保守的フォールバックを使う
 
     Returns:
         (sl_pips, tp_pips)
     """
     risk = trading_config["risk"]
     sl_mult = risk["sl_multiplier"]
-    tp_mult = risk["tp_multiplier"]
     sl_min = risk["sl_min_pips"]
     sl_max = risk["sl_max_pips"]
 
@@ -152,6 +164,19 @@ def calc_sl_tp_pips(atr: float, pair: str, trading_config: dict) -> tuple[float,
         atr_pips = atr * 10000    # 例: 0.0045 → 45pips
 
     sl_pips = max(sl_min, min(atr_pips * sl_mult, sl_max))
-    tp_pips = atr_pips * tp_mult
+
+    # 構造ターゲットは直近4H壁までの距離を使う。
+    # 極端に小さい/大きい値は約定ノイズや異常値の可能性があるのでキャップする。
+    structural_tp = abs(float(ob_4h_distance_pips or 0.0))
+    if structural_tp <= 0:
+        logger.warning(
+            f"ob_4h_distance_pips missing for {pair}. "
+            f"Fallback TP uses 1.5x SL ({sl_pips:.1f} pips base)"
+        )
+        structural_tp = sl_pips * 1.5
+
+    tp_min = max(5.0, sl_min * 0.5)
+    tp_max = max(tp_min, sl_max * 3.0)
+    tp_pips = max(tp_min, min(structural_tp, tp_max))
 
     return round(sl_pips, 1), round(tp_pips, 1)

@@ -19,7 +19,7 @@ from core.database import (
     get_labeled_training_samples,
     update_training_label,
 )
-from core.time_manager import now_utc
+from core.time_manager import now_utc, utc_to_mt5_server
 from ml.lgbm_model import FEATURE_NAMES
 from ml.trainer import train_model, walk_forward_validate
 
@@ -46,17 +46,21 @@ def _label_from_return(return_pips: float, atr_price: float, pair: str) -> int:
 
 
 def _get_future_close(pair: str, signal_time_utc: datetime, horizon_minutes: int) -> float | None:
-    target_time = signal_time_utc + timedelta(minutes=horizon_minutes)
-    start = target_time - timedelta(minutes=30)
-    end = target_time + timedelta(hours=2)
+    target_time_utc = signal_time_utc + timedelta(minutes=horizon_minutes)
+    start_utc = target_time_utc - timedelta(minutes=30)
+    end_utc = target_time_utc + timedelta(hours=2)
 
-    rates = mt5.copy_rates_range(pair, mt5.TIMEFRAME_M15, start, end)
+    target_time_mt5 = utc_to_mt5_server(target_time_utc)
+    start_mt5 = utc_to_mt5_server(start_utc)
+    end_mt5 = utc_to_mt5_server(end_utc)
+
+    rates = mt5.copy_rates_range(pair, mt5.TIMEFRAME_M15, start_mt5, end_mt5)
     if rates is None or len(rates) == 0:
         return None
 
     for row in rates:
-        bar_time = datetime.fromtimestamp(int(row["time"]), tz=timezone.utc)
-        if bar_time >= target_time:
+        bar_time_mt5 = datetime.fromtimestamp(int(row["time"]), tz=timezone.utc).astimezone(start_mt5.tzinfo)
+        if bar_time_mt5 >= target_time_mt5:
             return float(row["close"])
 
     return float(rates[-1]["close"])
@@ -124,6 +128,9 @@ def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
     X = []
     y = []
     for row in rows:
+        if row.get("label") is None:
+            continue
+
         X.append([
             float(row.get("fvg_4h_zone_active", 0)),
             float(row.get("ob_4h_zone_active", 0)),
@@ -139,10 +146,9 @@ def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
             float(row.get("close_vs_ema20_4h", 0.0)),
             float(row.get("close_vs_ema50_4h", 0.0)),
             float(row.get("high_low_range_15m", 0.0)),
-            float(row.get("spread_pips", 1.5)),
-            float(row.get("session_flag", 0)),
-            float(row.get("hour_of_day", 0)),
-            float(row.get("day_of_week", 0)),
+            float(row.get("trend_direction", 0)),
+            float(row.get("momentum_long", 0)),
+            float(row.get("momentum_short", 0)),
             float(row.get("macd_histogram", 0.0)),
             float(row.get("macd_signal_cross", 0)),
             float(row.get("rsi_14", 50.0)),
@@ -163,6 +169,9 @@ def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
             float(row.get("sentiment_score", 0.0)),
         ])
         y.append(int(row["label"]))
+
+    if not X:
+        return np.empty((0, len(FEATURE_NAMES)), dtype=np.float64), np.empty((0,), dtype=np.int32)
 
     X_np = np.array(X, dtype=np.float64)
     y_np = np.array(y, dtype=np.int32)

@@ -19,6 +19,7 @@ GPT-5.2 差分検知モジュール（Veto Layer B を含む）
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -37,6 +38,9 @@ class SentimentResult:
     sentiment_score: float  # -1.0 〜 1.0
     unexpected_veto: bool   # Veto Layer B フラグ
     summary: str
+    news_importance_score: float = 0.0
+    model_used: str = ""
+    escalated: bool = False
     timestamp_utc: datetime = field(default_factory=now_utc)
 
 
@@ -150,8 +154,80 @@ class LLMClient:
         self._client = openai.AsyncOpenAI(api_key=api_key)
         self._db_conn = db_conn
         self._config = get_trading_config()
-        self._model = self._config["llm"]["model_instant"]
-        self._reasoning_effort = self._config["llm"].get("reasoning_effort_instant", "low")
+        llm_cfg = self._config["llm"]
+        self._diff_model = llm_cfg.get("model_diff", llm_cfg["model_instant"])
+        self._instant_model = llm_cfg.get("model_instant", "gpt-5.2")
+        self._analysis_reasoning_effort = llm_cfg.get(
+            "reasoning_effort_diff",
+            llm_cfg.get("reasoning_effort_instant", "low"),
+        )
+        self._instant_reasoning_effort = llm_cfg.get("reasoning_effort_instant", "low")
+
+    def _as_bool(self, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes", "y"}
+        return bool(value)
+
+    async def _analyze_with_model(
+        self,
+        pair: str,
+        news_articles: list[dict],
+        market_context: str,
+        reason: str,
+        model: str,
+        reasoning_effort: str,
+        mode: str,
+    ) -> SentimentResult:
+        prompt = self._build_prompt(pair, news_articles, market_context)
+        messages = [
+            {"role": "system", "content": self._system_prompt(mode=mode)},
+            {"role": "user", "content": prompt},
+        ]
+
+        response = await self._client.responses.create(
+            model=model,
+            input=messages,
+            reasoning={"effort": reasoning_effort},
+        )
+
+        text = ""
+        for item in response.output:
+            if getattr(item, "type", "") != "message":
+                continue
+            content = getattr(item, "content", None)
+            if content is None:
+                continue
+            for block in content:
+                if hasattr(block, "text"):
+                    text += block.text
+
+        parsed = self._parse_llm_json(text)
+
+        result = SentimentResult(
+            sentiment_score=float(parsed.get("sentiment_score", 0.0)),
+            unexpected_veto=self._as_bool(parsed.get("unexpected_veto", False)),
+            summary=parsed.get("summary", ""),
+            news_importance_score=float(parsed.get("news_importance_score", 0.0)),
+            model_used=model,
+        )
+
+        if self._db_conn:
+            usage = response.usage
+            tokens_in = usage.input_tokens
+            tokens_out = usage.output_tokens
+            cost = self._estimate_cost(tokens_in, tokens_out, model)
+            insert_api_call(
+                self._db_conn,
+                reason=reason,
+                model=model,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cost_usd=cost,
+            )
+
+        return result
 
     async def analyze_sentiment(
         self,
@@ -172,68 +248,23 @@ class LLMClient:
         Returns:
             SentimentResult
         """
-        prompt = self._build_prompt(pair, news_articles, market_context)
-        messages = [
-            {"role": "system", "content": self._system_prompt()},
-            {"role": "user", "content": prompt},
-        ]
-
         try:
-            response = await self._client.responses.create(
-                model=self._model,
-                input=messages,
-                reasoning={"effort": self._reasoning_effort},
+            result = await self._analyze_with_model(
+                pair=pair,
+                news_articles=news_articles,
+                market_context=market_context,
+                reason=reason,
+                model=self._instant_model,
+                reasoning_effort=self._instant_reasoning_effort,
+                mode="deep",
             )
-
-            # Responses API: response.output を走査してメッセージテキストを抽出
-            # reasoning item は type="reasoning" でスキップ
-            text = ""
-            for item in response.output:
-                if getattr(item, "type", "") != "message":
-                    continue
-                content = getattr(item, "content", None)
-                if content is None:
-                    continue
-                for block in content:
-                    if hasattr(block, "text"):
-                        text += block.text
-
-            parsed = json.loads(text)
-
-            result = SentimentResult(
-                sentiment_score=float(parsed.get("sentiment_score", 0.0)),
-                unexpected_veto=bool(parsed.get("unexpected_veto", False)),
-                summary=parsed.get("summary", ""),
-            )
-
-            # API呼び出しログ記録（保存基準: UTC）
-            if self._db_conn:
-                usage = response.usage
-                tokens_in = usage.input_tokens
-                tokens_out = usage.output_tokens
-                cost = self._estimate_cost(tokens_in, tokens_out)
-                insert_api_call(
-                    self._db_conn,
-                    reason=reason,
-                    model=self._model,
-                    tokens_in=tokens_in,
-                    tokens_out=tokens_out,
-                    cost_usd=cost,
-                )
 
             logger.info(
-                f"GPT sentiment for {pair}: score={result.sentiment_score:.2f}, "
+                f"GPT sentiment for {pair} via {result.model_used}: score={result.sentiment_score:.2f}, "
                 f"veto={result.unexpected_veto}"
             )
             return result
 
-        except json.JSONDecodeError as e:
-            logger.error(f"GPT response parse error: {e}")
-            return SentimentResult(
-                sentiment_score=0.0,
-                unexpected_veto=False,
-                summary=f"Parse error: {e}",
-            )
         except openai.APITimeoutError:
             logger.error("GPT API timeout (>5s)")
             return SentimentResult(
@@ -252,7 +283,87 @@ class LLMClient:
             logger.critical("GPT API authentication error (401/403)")
             raise  # 上位で llm_enabled=false にする
 
-    def _system_prompt(self) -> str:
+    async def analyze_sentiment_hybrid(
+        self,
+        pair: str,
+        news_articles: list[dict],
+        market_context: str,
+        reason: str,
+    ) -> SentimentResult:
+        """nanoで常時判定し、重要ニュース時のみ gpt-5.2 で再判定する。"""
+        llm_cfg = self._config.get("llm", {})
+        if not llm_cfg.get("hybrid_enabled", True):
+            return await self.analyze_sentiment(pair, news_articles, market_context, reason)
+
+        try:
+            quick = await self._analyze_with_model(
+                pair=pair,
+                news_articles=news_articles,
+                market_context=market_context,
+                reason=f"{reason}:quick",
+                model=self._diff_model,
+                reasoning_effort=self._analysis_reasoning_effort,
+                mode="quick",
+            )
+
+            threshold = float(llm_cfg.get("news_importance_escalation_threshold", 0.65))
+            escalate = quick.news_importance_score >= threshold or quick.unexpected_veto
+            if not escalate:
+                logger.info(
+                    f"GPT hybrid quick for {pair}: model={quick.model_used} importance={quick.news_importance_score:.2f}"
+                )
+                return quick
+
+            deep = await self._analyze_with_model(
+                pair=pair,
+                news_articles=news_articles,
+                market_context=market_context,
+                reason=f"{reason}:deep",
+                model=self._instant_model,
+                reasoning_effort=self._instant_reasoning_effort,
+                mode="deep",
+            )
+            deep.escalated = True
+            deep.news_importance_score = max(deep.news_importance_score, quick.news_importance_score)
+            logger.info(
+                f"GPT hybrid escalated for {pair}: {quick.model_used} -> {deep.model_used}, "
+                f"importance={deep.news_importance_score:.2f}, veto={deep.unexpected_veto}"
+            )
+            return deep
+
+        except openai.APITimeoutError:
+            logger.error("GPT API timeout (>5s)")
+            return SentimentResult(
+                sentiment_score=0.0,
+                unexpected_veto=False,
+                summary="API timeout",
+                news_importance_score=0.0,
+                model_used=self._diff_model,
+            )
+        except openai.RateLimitError:
+            logger.error("GPT API rate limit (429)")
+            return SentimentResult(
+                sentiment_score=0.0,
+                unexpected_veto=False,
+                summary="Rate limited",
+                news_importance_score=0.0,
+                model_used=self._diff_model,
+            )
+        except openai.AuthenticationError:
+            logger.critical("GPT API authentication error (401/403)")
+            raise
+
+    def _system_prompt(self, mode: str = "deep") -> str:
+        if mode == "quick":
+            return (
+                "You are a low-cost forex news triage analyzer. "
+                "Return strict JSON only with these fields:\n"
+                "- sentiment_score: float from -1.0 to 1.0\n"
+                "- unexpected_veto: boolean\n"
+                "- news_importance_score: float from 0.0 to 1.0\n"
+                "- summary: brief summary (max 100 chars)"
+            )
+
         return (
             "You are a forex market sentiment analyzer. "
             "Analyze the provided news and market context. "
@@ -260,6 +371,7 @@ class LLMClient:
             "- sentiment_score: float from -1.0 (very bearish) to 1.0 (very bullish)\n"
             "- unexpected_veto: boolean, true if there is a sudden geopolitical or "
             "economic event that should halt trading\n"
+            "- news_importance_score: float from 0.0 to 1.0\n"
             "- summary: brief summary of the analysis (max 100 chars)"
         )
 
@@ -275,6 +387,41 @@ class LLMClient:
             f"Provide sentiment analysis in JSON format."
         )
 
-    def _estimate_cost(self, tokens_in: int, tokens_out: int) -> float:
-        """GPT-5.2 のコスト概算（input $1.75/M、output $14/M tokens）。"""
-        return (tokens_in * 1.75 + tokens_out * 14.0) / 1_000_000
+    def _parse_llm_json(self, raw_text: str) -> dict:
+        """LLM出力JSONを安全にパースする（Markdown混入対策つき）。"""
+        cleaned = raw_text.strip()
+        cleaned = re.sub(r"^```json\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^```\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        logger.error(f"GPT response parse failed. raw={raw_text[:500]}")
+        return {
+            "sentiment_score": 0.0,
+            "unexpected_veto": True,
+            "news_importance_score": 1.0,
+            "summary": "Parse error fallback",
+        }
+
+    def _estimate_cost(self, tokens_in: int, tokens_out: int, model_name: str) -> float:
+        """定期ニュース判定用モデルのコスト概算。未定義モデルは model_instant 相当で保守的に扱う。"""
+        pricing = {
+            "gpt-5.2-nano": (0.2, 1.6),
+            "gpt-5.2": (1.75, 14.0),
+        }
+        input_per_million, output_per_million = pricing.get(
+            model_name,
+            pricing["gpt-5.2"],
+        )
+        return (tokens_in * input_per_million + tokens_out * output_per_million) / 1_000_000

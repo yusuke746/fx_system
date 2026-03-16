@@ -30,6 +30,7 @@ python-dotenv==1.0.1
 # HTTP / XML
 requests==2.32.3
 httpx==0.28.1
+defusedxml==0.7.1
 
 # Discord notifications
 aiohttp==3.11.12; python_version < "3.14"
@@ -43,3 +44,4 @@ loguru==0.7.3
 
 # Security
 cryptography==44.0.0
+cachetools==5.5.2

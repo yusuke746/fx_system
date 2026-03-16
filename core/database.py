@@ -6,11 +6,44 @@ DB管理モジュール
 """
 
 import sqlite3
+import time
 from pathlib import Path
 
 from loguru import logger
 
 from core.time_manager import now_utc, broker_day_start_utc
+
+
+_WRITE_RETRIES = 5
+_WRITE_RETRY_DELAY_SEC = 0.2
+
+
+def _is_sqlite_locked_error(exc: sqlite3.OperationalError) -> bool:
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database table is locked" in msg
+
+
+def _execute_with_retry(conn: sqlite3.Connection, query: str, params: tuple = ()) -> sqlite3.Cursor:
+    for attempt in range(_WRITE_RETRIES):
+        try:
+            return conn.execute(query, params)
+        except sqlite3.OperationalError as e:
+            if _is_sqlite_locked_error(e) and attempt < _WRITE_RETRIES - 1:
+                time.sleep(_WRITE_RETRY_DELAY_SEC * (attempt + 1))
+                continue
+            raise
+
+
+def _commit_with_retry(conn: sqlite3.Connection) -> None:
+    for attempt in range(_WRITE_RETRIES):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            if _is_sqlite_locked_error(e) and attempt < _WRITE_RETRIES - 1:
+                time.sleep(_WRITE_RETRY_DELAY_SEC * (attempt + 1))
+                continue
+            raise
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
@@ -52,7 +85,7 @@ CREATE TABLE IF NOT EXISTS trades (
     tp_price    REAL,
     pnl_pips    REAL,
     pnl_jpy     REAL,
-    exit_reason TEXT,                   -- 'atr_sl'|'scale_out_1'|'scale_out_2'|'doten'|'time_exit'|'calendar_veto'|'trailing'
+    exit_reason TEXT,                   -- 'atr_sl'|'doten'|'time_exit'|'calendar_veto'|'trailing'|'prob_decay'|'time_decay'|'structural_tp'
     mt5_ticket  INTEGER,
     created_at  TIMESTAMP DEFAULT (datetime('now'))  -- UTC
 );
@@ -88,10 +121,10 @@ CREATE TABLE IF NOT EXISTS optimization_history (
     optimized_at         TIMESTAMP NOT NULL, -- UTC
     optimize_window_days INTEGER NOT NULL,
     validate_window_days INTEGER NOT NULL,
-    step1_ratio          REAL,
-    step2_ratio          REAL,
     sl_multiplier        REAL,
-    tp_multiplier        REAL,
+    exit_prob_threshold  REAL,
+    time_decay_minutes   INTEGER,
+    time_decay_min_profit_atr REAL,
     sharpe_optimize      REAL,
     sharpe_validate      REAL,
     sample_count         INTEGER,
@@ -120,6 +153,9 @@ CREATE TABLE IF NOT EXISTS training_samples (
     close_vs_ema20_4h        REAL,
     close_vs_ema50_4h        REAL,
     high_low_range_15m       REAL,
+    trend_direction          INTEGER,
+    momentum_long            INTEGER,
+    momentum_short           INTEGER,
     macd_histogram           REAL,
     macd_signal_cross        INTEGER,
     rsi_14                   REAL,
@@ -134,10 +170,6 @@ CREATE TABLE IF NOT EXISTS training_samples (
     consecutive_same_dir     INTEGER,
     pivot_proximity          REAL,
     sweep_pending_bars       INTEGER,
-    spread_pips              REAL DEFAULT 1.5,
-    session_flag             INTEGER,
-    hour_of_day              INTEGER,
-    day_of_week              INTEGER,
     open_positions_count     INTEGER DEFAULT 0,
     max_dd_24h               REAL DEFAULT 0,
     calendar_risk_score      INTEGER DEFAULT 0,
@@ -162,7 +194,8 @@ CREATE INDEX IF NOT EXISTS idx_training_unlabeled ON training_samples(label, sig
 
 def insert_trade(conn: sqlite3.Connection, trade: dict) -> int:
     """トレードレコードを挿入し、IDを返す。"""
-    cur = conn.execute(
+    cur = _execute_with_retry(
+        conn,
         """INSERT INTO trades
            (pair, direction, open_time, open_price, volume, sl_price, tp_price, mt5_ticket)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -177,7 +210,7 @@ def insert_trade(conn: sqlite3.Connection, trade: dict) -> int:
             trade.get("mt5_ticket"),
         ),
     )
-    conn.commit()
+    _commit_with_retry(conn)
     return cur.lastrowid
 
 
@@ -190,18 +223,20 @@ def close_trade(
     exit_reason: str,
 ) -> None:
     """トレードを決済済みとして更新する。"""
-    conn.execute(
+    _execute_with_retry(
+        conn,
         """UPDATE trades
            SET close_time=?, close_price=?, pnl_pips=?, pnl_jpy=?, exit_reason=?
            WHERE id=?""",
         (now_utc().isoformat(), close_price, pnl_pips, pnl_jpy, exit_reason, trade_id),
     )
-    conn.commit()
+    _commit_with_retry(conn)
 
 
 def insert_signal(conn: sqlite3.Connection, signal: dict) -> int:
     """シグナルレコードを挿入し、IDを返す。"""
-    cur = conn.execute(
+    cur = _execute_with_retry(
+        conn,
         """INSERT INTO signals
            (pair, signal_time, direction, lgbm_prob_up, lgbm_prob_flat,
             lgbm_prob_down, gpt_sentiment, mtf_confluence, executed, veto_reason)
@@ -219,37 +254,39 @@ def insert_signal(conn: sqlite3.Connection, signal: dict) -> int:
             signal.get("veto_reason"),
         ),
     )
-    conn.commit()
+    _commit_with_retry(conn)
     return cur.lastrowid
 
 
 def insert_api_call(conn: sqlite3.Connection, reason: str, model: str,
                     tokens_in: int, tokens_out: int, cost_usd: float) -> None:
     """GPT API呼び出しログを記録する。"""
-    conn.execute(
+    _execute_with_retry(
+        conn,
         """INSERT INTO api_call_log (call_time, reason, model, tokens_in, tokens_out, cost_usd)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (now_utc().isoformat(), reason, model, tokens_in, tokens_out, cost_usd),
     )
-    conn.commit()
+    _commit_with_retry(conn)
 
 
 def insert_optimization(conn: sqlite3.Connection, opt: dict) -> int:
     """最適化結果を記録する。"""
-    cur = conn.execute(
+    cur = _execute_with_retry(
+        conn,
         """INSERT INTO optimization_history
            (optimized_at, optimize_window_days, validate_window_days,
-            step1_ratio, step2_ratio, sl_multiplier, tp_multiplier,
+            sl_multiplier, exit_prob_threshold, time_decay_minutes, time_decay_min_profit_atr,
             sharpe_optimize, sharpe_validate, sample_count, was_applied, rollback_reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             now_utc().isoformat(),
             opt["optimize_window_days"],
             opt["validate_window_days"],
-            opt.get("step1_ratio"),
-            opt.get("step2_ratio"),
             opt.get("sl_multiplier"),
-            opt.get("tp_multiplier"),
+            opt.get("exit_prob_threshold"),
+            opt.get("time_decay_minutes"),
+            opt.get("time_decay_min_profit_atr"),
             opt.get("sharpe_optimize"),
             opt.get("sharpe_validate"),
             opt.get("sample_count"),
@@ -257,7 +294,7 @@ def insert_optimization(conn: sqlite3.Connection, opt: dict) -> int:
             opt.get("rollback_reason"),
         ),
     )
-    conn.commit()
+    _commit_with_retry(conn)
     return cur.lastrowid
 
 
@@ -298,19 +335,21 @@ def check_integrity(conn: sqlite3.Connection) -> bool:
 
 
 def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
-    """学習用サンプル（特徴量36個）を保存する。"""
-    cur = conn.execute(
+    """学習用サンプル（特徴量35個）を保存する。"""
+    cur = _execute_with_retry(
+        conn,
         """INSERT INTO training_samples (
            pair, signal_time, direction, close_price, atr,
            fvg_4h_zone_active, ob_4h_zone_active, liq_sweep_1h,
            liq_sweep_qualified, bos_1h, choch_1h, msb_15m_confirmed,
            mtf_confluence, atr_ratio, bb_width,
            close_vs_ema20_4h, close_vs_ema50_4h, high_low_range_15m,
+              trend_direction, momentum_long, momentum_short,
            macd_histogram, macd_signal_cross, rsi_14, rsi_zone,
            stoch_k, stoch_d, momentum_3bar,
            ob_4h_distance_pips, fvg_4h_fill_ratio, liq_sweep_strength,
            prior_candle_body_ratio, consecutive_same_dir, pivot_proximity,
-           sweep_pending_bars, spread_pips, session_flag, hour_of_day, day_of_week,
+              sweep_pending_bars,
            open_positions_count, max_dd_24h, calendar_risk_score, sentiment_score
         ) VALUES (
            ?, ?, ?, ?, ?,
@@ -318,11 +357,12 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
            ?, ?, ?, ?,
            ?, ?, ?,
            ?, ?, ?,
+              ?, ?, ?,
            ?, ?, ?, ?,
            ?, ?, ?,
            ?, ?, ?,
            ?, ?, ?,
-           ?, ?, ?, ?, ?,
+              ?,
            ?, ?, ?, ?
         )""",
         (
@@ -344,6 +384,9 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
             sample.get("close_vs_ema20_4h", 0.0),
             sample.get("close_vs_ema50_4h", 0.0),
             sample.get("high_low_range_15m", 0.0),
+            sample.get("trend_direction", 0),
+            sample.get("momentum_long", 0),
+            sample.get("momentum_short", 0),
             sample.get("macd_histogram", 0.0),
             sample.get("macd_signal_cross", 0),
             sample.get("rsi_14", 50.0),
@@ -358,17 +401,13 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
             sample.get("consecutive_same_dir", 0),
             sample.get("pivot_proximity", 0.0),
             sample.get("sweep_pending_bars", 0),
-            sample.get("spread_pips", 1.5),
-            sample.get("session_flag", 0),
-            sample.get("hour_of_day", 0),
-            sample.get("day_of_week", 0),
             sample.get("open_positions_count", 0),
             sample.get("max_dd_24h", 0.0),
             sample.get("calendar_risk_score", 0),
             sample.get("sentiment_score", 0.0),
         ),
     )
-    conn.commit()
+    _commit_with_retry(conn)
     return cur.lastrowid
 
 
@@ -392,13 +431,14 @@ def update_training_label(
     future_return_pips: float,
 ) -> None:
     """学習サンプルにラベルを付与する。"""
-    conn.execute(
+    _execute_with_retry(
+        conn,
         """UPDATE training_samples
            SET label=?, future_close_price=?, future_return_pips=?, labeled_at=?
            WHERE id=?""",
         (label, future_close, future_return_pips, now_utc().isoformat(), sample_id),
     )
-    conn.commit()
+    _commit_with_retry(conn)
 
 
 def get_labeled_training_samples(

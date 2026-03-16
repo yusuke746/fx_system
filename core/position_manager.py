@@ -1,14 +1,14 @@
 """
 ポジション管理・エグジット戦略モジュール
 
-■ エグジット優先順位（v2.2 最終確定版）
+■ エグジット優先順位（ダイナミック・エグジット版）
   1. Calendar Veto 強制クローズ（最高優先）
   2. ATR動的SL到達（MT5 OCO注文）
-  3. 反対シグナルドテン（インターバル制限付き）
-  4. スケールアウト Step1（+1.0×ATR → 50%利確 + SL→BE）
-  5. スケールアウト Step2（+1.8×ATR → 25%利確 + トレーリングへ）
-  6. トレーリングストップ（0.8×ATR追従）
-  7. 時間ベース強制クローズ（4h超過/金曜22:00/セッション跨ぎ）
+    3. ML確率減衰エグジット
+    4. タイムディケイ撤退
+    5. 構造的ターゲット到達
+    6. トレイリングストップ
+    7. 運用安全のための金曜クローズ（補助安全弁）
 
 ■ ドテン制限
   - エントリーから15分未満は無視（一時的逆行）
@@ -22,24 +22,26 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+import sqlite3
 
 from loguru import logger
 
 from broker.mt5_broker import MT5Broker
 from config.settings import get_trading_config
+from core.database import close_trade
 from core.notifier import DiscordNotifier, AlertLevel
 from core.time_manager import (
     now_utc,
     elapsed_seconds,
+    elapsed_minutes,
     is_friday_close_window,
-    get_session,
-    format_jst,
 )
 
 
 @dataclass
 class ManagedPosition:
     """管理中のポジション情報。"""
+    trade_id: int | None
     ticket: int
     pair: str
     direction: str
@@ -47,12 +49,16 @@ class ManagedPosition:
     open_price: float
     sl_price: float
     tp_price: float
+    target_tp_price: float
+    target_tp_pips: float
     open_time_utc: datetime
     atr_at_entry: float
-    # スケールアウト管理
-    step1_done: bool = False
-    step2_done: bool = False
-    trailing_active: bool = False
+    # 最新のLightGBM予測を同一ペアの新着シグナルで上書きする。
+    prob_up: float = 0.0
+    prob_flat: float = 0.0
+    prob_down: float = 0.0
+    last_prediction_at_utc: datetime | None = None
+    trailing_active: bool = True
     trailing_high: float = 0.0  # long の場合の最高値
     trailing_low: float = float("inf")  # short の場合の最安値
 
@@ -60,9 +66,10 @@ class ManagedPosition:
 class PositionManager:
     """ポジション管理・エグジット戦略の実行。"""
 
-    def __init__(self, broker: MT5Broker, notifier: DiscordNotifier):
+    def __init__(self, broker: MT5Broker, notifier: DiscordNotifier, db_conn: sqlite3.Connection | None = None):
         self._broker = broker
         self._notifier = notifier
+        self._db_conn = db_conn
         self._positions: dict[int, ManagedPosition] = {}  # ticket -> ManagedPosition
         # ドテンインターバル管理（比較基準: UTC）
         self._last_doten_time: dict[str, datetime] = {}
@@ -73,6 +80,12 @@ class PositionManager:
 
     def register_position(self, pos: ManagedPosition) -> None:
         """新規ポジションを管理対象に登録する。"""
+        # トレーリング起点はエントリー価格で初期化しておく。
+        if pos.direction == "long" and pos.trailing_high <= 0:
+            pos.trailing_high = pos.open_price
+        if pos.direction == "short" and pos.trailing_low == float("inf"):
+            pos.trailing_low = pos.open_price
+
         self._positions[pos.ticket] = pos
         logger.info(
             f"Position registered: {pos.pair} {pos.direction} "
@@ -101,6 +114,23 @@ class PositionManager:
         return elapsed_seconds(pos.open_time_utc) >= min_minutes * 60
 
     # ── ドテン高速連続発注 ──────────────────────
+    def update_pair_prediction(
+        self,
+        pair: str,
+        prob_up: float,
+        prob_flat: float,
+        prob_down: float,
+    ) -> None:
+        """同一ペアの最新予測を保有ポジションへ反映する。"""
+        updated_at = now_utc()
+        for pos in self._positions.values():
+            if pos.pair != pair:
+                continue
+            pos.prob_up = prob_up
+            pos.prob_flat = prob_flat
+            pos.prob_down = prob_down
+            pos.last_prediction_at_utc = updated_at
+
     async def execute_doten(
         self,
         pair: str,
@@ -109,13 +139,15 @@ class PositionManager:
         volume: float,
         sl_price: float,
         tp_price: float,
-        atr: float,
         signal_price: float,
-    ) -> bool:
+        reason: str = "doten",
+    ) -> tuple[bool, int | None]:
         """
         ドテン高速連続発注。
         決済→確認→新規の順序保証（asyncio.gather は使わない）。
         """
+        pos = self._positions.get(ticket)
+
         # 決済
         close_ok = await self._broker.close_position_async(ticket)
         if not close_ok:
@@ -123,9 +155,12 @@ class PositionManager:
                 f"[DOTEN FAIL] {pair} 決済失敗 ticket={ticket}",
                 AlertLevel.CRITICAL,
             )
-            return False
+            return False, None
 
-        self.unregister_position(ticket)
+        if pos is not None:
+            self._finalize_closed_position(pos, signal_price, reason)
+        else:
+            self.unregister_position(ticket)
 
         # 新規建て
         open_ok, new_ticket = await self._broker.open_position_async(
@@ -136,32 +171,21 @@ class PositionManager:
                 f"[DOTEN FAIL] {pair} 新規建て失敗（決済済み・ノーポジ）",
                 AlertLevel.CRITICAL,
             )
-            return False
-
-        # 新ポジション登録
-        self.register_position(ManagedPosition(
-            ticket=new_ticket,
-            pair=pair,
-            direction=direction,
-            volume=volume,
-            open_price=signal_price,
-            sl_price=sl_price,
-            tp_price=tp_price,
-            open_time_utc=now_utc(),
-            atr_at_entry=atr,
-        ))
+            return False, None
 
         self._last_doten_time[pair] = now_utc()
         logger.info(f"Doten executed: {pair} → {direction} ticket={new_ticket}")
-        return True
+        return True, new_ticket
 
     # ── 毎分ポジション監視 ────────────────────
     async def monitor_positions(self) -> None:
         """
-        毎分実行: 全ポジションのスケールアウト・トレーリング・時間Exit をチェック。
+        毎分実行: 全ポジションのダイナミック・エグジットをチェックする。
         """
         config = get_trading_config()
         risk = config["risk"]
+
+        await self._sync_closed_positions_with_broker()
 
         for ticket, pos in list(self._positions.items()):
             current_price = self._get_current_price(pos.pair, pos.direction)
@@ -170,86 +194,68 @@ class PositionManager:
 
             # 優先1: Calendar Veto 強制クローズは Orchestrator 側で処理
 
-            # 優先4: スケールアウト Step1
-            if not pos.step1_done:
-                await self._check_scale_out_step1(pos, current_price, risk)
+            # 優先3: 確率減衰。最新の同一ペア予測が弱くなったら撤退する。
+            if self._should_exit_prob_decay(pos, risk):
+                await self._force_close(pos, "prob_decay", current_price)
+                continue
 
-            # 優先5: スケールアウト Step2
-            if pos.step1_done and not pos.step2_done:
-                await self._check_scale_out_step2(pos, current_price, risk)
+            # 優先4: 時間減衰。時間経過後も伸びないポジションを切る。
+            if self._should_exit_time_decay(pos, current_price, risk):
+                await self._force_close(pos, "time_decay", current_price)
+                continue
+
+            # 優先5: 構造的ターゲット到達。
+            if self._has_hit_structural_target(pos, current_price):
+                await self._force_close(pos, "structural_tp", current_price)
+                continue
 
             # 優先6: トレーリングストップ
             if pos.trailing_active:
                 await self._update_trailing_stop(pos, current_price, risk)
 
-            # 優先7: 時間ベース強制クローズ
-            await self._check_time_exit(pos)
+            # 優先7: 金曜クローズは戦略ではなく運用安全弁として維持する。
+            if is_friday_close_window(now_utc()):
+                await self._force_close(pos, "time_exit", current_price)
+                continue
 
-    async def _check_scale_out_step1(
-        self, pos: ManagedPosition, current_price: float, risk: dict
-    ) -> None:
-        """スケールアウト Step1: +1.0×ATR → 50%利確 + SL→BE"""
-        target = pos.atr_at_entry * 1.0
+    def _should_exit_prob_decay(self, pos: ManagedPosition, risk: dict) -> bool:
+        """最新予測の方向優位が消えたときに撤退する。"""
+        threshold = float(risk.get("exit_prob_threshold", 0.35))
+        if pos.last_prediction_at_utc is None:
+            return False
         if pos.direction == "long":
-            pnl = current_price - pos.open_price
-        else:
-            pnl = pos.open_price - current_price
+            return pos.prob_up < threshold
+        return pos.prob_down < threshold
 
-        if pnl >= target:
-            close_ratio = risk.get("scale_out_step1_ratio", 0.50)
-            close_vol = round(pos.volume * close_ratio, 2)
-            if close_vol < 0.01:
-                return
+    def _should_exit_time_decay(
+        self,
+        pos: ManagedPosition,
+        current_price: float,
+        risk: dict,
+    ) -> bool:
+        """一定時間経っても含み益が伸びなければダマシとして撤退する。"""
+        elapsed = elapsed_minutes(pos.open_time_utc)
+        min_minutes = float(risk.get("time_decay_minutes", 60))
+        if elapsed < min_minutes:
+            return False
 
-            ok = await self._broker.partial_close_async(pos.ticket, close_vol)
-            if ok:
-                pos.step1_done = True
-                pos.volume = round(pos.volume - close_vol, 2)
-                # SL → BE（建値）
-                await self._broker.modify_sl_tp_async(pos.ticket, sl=pos.open_price)
-                pos.sl_price = pos.open_price
-                logger.info(
-                    f"Scale-out Step1: {pos.pair} ticket={pos.ticket} "
-                    f"closed {close_vol} lots, SL→BE"
-                )
+        min_profit_atr = float(risk.get("time_decay_min_profit_atr", 0.5))
+        current_profit = self._price_move_in_favor(pos, current_price)
+        required_profit = pos.atr_at_entry * min_profit_atr
+        return current_profit < required_profit
 
-    async def _check_scale_out_step2(
-        self, pos: ManagedPosition, current_price: float, risk: dict
-    ) -> None:
-        """スケールアウト Step2: +1.8×ATR → 25%利確 + トレーリング移行"""
-        target = pos.atr_at_entry * 1.8
+    def _has_hit_structural_target(self, pos: ManagedPosition, current_price: float) -> bool:
+        """Pine由来の構造TP価格に到達したかを判定する。"""
+        if pos.target_tp_price <= 0:
+            return False
         if pos.direction == "long":
-            pnl = current_price - pos.open_price
-        else:
-            pnl = pos.open_price - current_price
-
-        if pnl >= target:
-            close_ratio = risk.get("scale_out_step2_ratio", 0.25)
-            original_volume = pos.volume / (1 - risk.get("scale_out_step1_ratio", 0.50))
-            close_vol = round(original_volume * close_ratio, 2)
-            if close_vol < 0.01:
-                return
-
-            close_vol = min(close_vol, pos.volume - 0.01)
-            if close_vol < 0.01:
-                return
-
-            ok = await self._broker.partial_close_async(pos.ticket, close_vol)
-            if ok:
-                pos.step2_done = True
-                pos.volume = round(pos.volume - close_vol, 2)
-                pos.trailing_active = True
-                pos.trailing_high = current_price if pos.direction == "long" else 0.0
-                pos.trailing_low = current_price if pos.direction == "short" else float("inf")
-                logger.info(
-                    f"Scale-out Step2: {pos.pair} ticket={pos.ticket} "
-                    f"closed {close_vol} lots, trailing activated"
-                )
+            return current_price >= pos.target_tp_price
+        return current_price <= pos.target_tp_price
 
     async def _update_trailing_stop(
         self, pos: ManagedPosition, current_price: float, risk: dict
     ) -> None:
-        """トレーリングストップ: 高値更新ごとに 0.8×ATR 追従。"""
+        """トレーリングストップ: 高値/安値更新ごとに ATR倍率で追従する。"""
         trail_dist = pos.atr_at_entry * risk.get("trailing_atr_multiplier", 0.8)
 
         if pos.direction == "long":
@@ -267,33 +273,14 @@ class PositionManager:
                     await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
                     pos.sl_price = new_sl
 
-    async def _check_time_exit(self, pos: ManagedPosition) -> None:
-        """時間ベース強制クローズ（4h超過 / 金曜22:00 / セッション跨ぎ）。"""
-        now = now_utc()
-
-        # 4時間超過
-        if elapsed_seconds(pos.open_time_utc) > 4 * 3600:
-            await self._force_close(pos, "time_exit_4h")
-            return
-
-        # 金曜22:00 JST
-        if is_friday_close_window(now):
-            await self._force_close(pos, "time_exit_friday")
-            return
-
-        # セッション跨ぎ: エントリー時と現在でセッションが異なる場合
-        entry_session = get_session(pos.open_time_utc)
-        current_session = get_session(now)
-        if entry_session != current_session and entry_session != "other":
-            await self._force_close(pos, f"session_cross_{entry_session}_to_{current_session}")
-            return
-
-    async def _force_close(self, pos: ManagedPosition, reason: str) -> None:
+    async def _force_close(self, pos: ManagedPosition, reason: str, close_price: float | None = None) -> None:
         """強制クローズ実行。"""
+        if close_price is None:
+            close_price = self._get_current_price(pos.pair, pos.direction)
+
         ok = await self._broker.close_position_async(pos.ticket)
         if ok:
-            self.unregister_position(pos.ticket)
-            logger.info(f"Force close: {pos.pair} ticket={pos.ticket} reason={reason}")
+            self._finalize_closed_position(pos, close_price, reason)
             await self._notifier.send(
                 f"ポジション強制クローズ: {pos.pair} {pos.direction} "
                 f"ticket={pos.ticket} 理由={reason}",
@@ -306,13 +293,97 @@ class PositionManager:
         """全ポジション強制クローズ。Calendar Veto 等で使用。"""
         closed = 0
         for ticket, pos in list(self._positions.items()):
+            close_price = self._get_current_price(pos.pair, pos.direction)
             ok = await self._broker.close_position_async(ticket)
             if ok:
-                self.unregister_position(ticket)
+                self._finalize_closed_position(pos, close_price, reason)
                 closed += 1
         if closed > 0:
             logger.info(f"All positions closed: {closed} positions, reason={reason}")
         return closed
+
+    async def _sync_closed_positions_with_broker(self) -> None:
+        """MT5側で先にクローズされたポジションを検知し、ローカル状態を同期する。"""
+        broker_positions = self._broker.get_positions()
+        open_tickets = {int(pos["ticket"]) for pos in broker_positions}
+
+        for ticket, pos in list(self._positions.items()):
+            if ticket in open_tickets:
+                continue
+
+            closed_info = self._broker.get_recent_closed_position_info(ticket)
+            if closed_info is None:
+                # 履歴が取れない場合でも、ゴーストポジション化を避けるためローカル状態は落とす。
+                logger.warning(f"Closed position history not found for ticket={ticket}; unregister only")
+                self.unregister_position(ticket)
+                continue
+
+            reason = self._infer_external_exit_reason(pos, closed_info["close_price"])
+            self._finalize_closed_position(
+                pos,
+                closed_info.get("close_price"),
+                reason,
+                pnl_jpy_override=closed_info.get("profit"),
+            )
+
+    def _infer_external_exit_reason(self, pos: ManagedPosition, close_price: float) -> str:
+        """MT5側で先に決済された場合の理由を価格位置から推定する。"""
+        tolerance = 1e-5 if pos.pair not in ("USDJPY", "GBPJPY") else 1e-3
+
+        if self._has_hit_structural_target(pos, close_price):
+            return "structural_tp"
+
+        if pos.direction == "long" and close_price <= pos.sl_price + tolerance:
+            return "trailing" if pos.sl_price >= pos.open_price else "atr_sl"
+        if pos.direction == "short" and close_price >= pos.sl_price - tolerance:
+            return "trailing" if pos.sl_price <= pos.open_price else "atr_sl"
+
+        return "time_exit"
+
+    def _finalize_closed_position(
+        self,
+        pos: ManagedPosition,
+        close_price: float | None,
+        reason: str,
+        pnl_jpy_override: float | None = None,
+    ) -> None:
+        """クローズ後のローカル状態とDB記録をまとめて更新する。"""
+        self.unregister_position(pos.ticket)
+        logger.info(f"Force close: {pos.pair} ticket={pos.ticket} reason={reason}")
+
+        if self._db_conn is None or pos.trade_id is None or close_price is None:
+            return
+
+        pnl_pips, pnl_jpy = self._estimate_pnl(pos, close_price)
+        if pnl_jpy_override is not None:
+            pnl_jpy = round(float(pnl_jpy_override), 0)
+        try:
+            close_trade(
+                self._db_conn,
+                trade_id=pos.trade_id,
+                close_price=close_price,
+                pnl_pips=pnl_pips,
+                pnl_jpy=pnl_jpy,
+                exit_reason=reason,
+            )
+        except Exception as e:
+            logger.error(f"Failed to persist trade close for ticket={pos.ticket}: {e}")
+
+    def _price_move_in_favor(self, pos: ManagedPosition, current_price: float) -> float:
+        """ポジション方向に有利な価格差を返す。"""
+        if pos.direction == "long":
+            return current_price - pos.open_price
+        return pos.open_price - current_price
+
+    def _estimate_pnl(self, pos: ManagedPosition, close_price: float) -> tuple[float, float]:
+        """決済記録用の pips / 円損益を概算する。"""
+        pip_unit = 0.01 if pos.pair in ("USDJPY", "GBPJPY") else 0.0001
+        pnl_price = self._price_move_in_favor(pos, close_price)
+        pnl_pips = pnl_price / pip_unit
+
+        pip_value_per_mini_lot = 100 if pos.pair in ("USDJPY", "GBPJPY") else 110
+        pnl_jpy = pnl_pips * pip_value_per_mini_lot * (pos.volume / 0.01)
+        return round(pnl_pips, 1), round(pnl_jpy, 0)
 
     def _get_current_price(self, pair: str, direction: str) -> float | None:
         """現在価格を取得する（long→bid, short→ask）。"""

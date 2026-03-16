@@ -1,16 +1,16 @@
 """
 LightGBM 特徴量エンジニアリング・推論モジュール
 
-■ 36特徴量（MTF SMC v2.3版）
+■ 35特徴量（MTF SMC v2.3 センサー拡張版）
 
-  SMCフラグ(8): fvg_4h_zone_active, ob_4h_zone_active, liq_sweep_1h,
-                 liq_sweep_qualified, bos_1h, choch_1h,
-                 msb_15m_confirmed, mtf_confluence
-  価格・ボラティリティ系(10): atr_14, atr_ratio, bb_width,
-                 close_vs_ema20_4h, close_vs_ema50_4h, high_low_range_15m,
-                 spread_pips, session_flag, hour_of_day, day_of_week
-  モメンタム系(7): macd_histogram, macd_signal_cross, rsi_14, rsi_zone,
-                 stoch_k, stoch_d, momentum_3bar
+    SMCフラグ(8): fvg_4h_zone_active, ob_4h_zone_active, liq_sweep_1h,
+                                 liq_sweep_qualified, bos_1h, choch_1h,
+                                 msb_15m_confirmed, mtf_confluence
+    価格・ボラティリティ系(6): atr_14, atr_ratio, bb_width,
+                                 close_vs_ema20_4h, close_vs_ema50_4h, high_low_range_15m
+    トレンド・モメンタム補助(3): trend_direction, momentum_long, momentum_short
+    モメンタム系(7): macd_histogram, macd_signal_cross, rsi_14, rsi_zone,
+                                 stoch_k, stoch_d, momentum_3bar
   構造・パターン系(7): ob_4h_distance_pips, fvg_4h_fill_ratio,
                  liq_sweep_strength, prior_candle_body_ratio,
                  consecutive_same_dir, pivot_proximity, sweep_pending_bars
@@ -18,8 +18,7 @@ LightGBM 特徴量エンジニアリング・推論モジュール
                  calendar_risk_score, sentiment_score
 
 ■ 時刻基準
-  - hour_of_day: JST（表示基準）の時間を使用（日本時間でのセッション特性を反映）
-  - day_of_week: 0=月曜〜4=金曜（UTC基準で算出）
+    - 全特徴量は保存基準（UTC）の signal_time に紐づけて管理
 """
 
 from dataclasses import dataclass
@@ -30,7 +29,6 @@ import numpy as np
 from loguru import logger
 
 from config.settings import get_trading_config
-from core.time_manager import now_utc, to_jst
 
 
 # ── 特徴量名の定義（順番固定） ────────────────────
@@ -44,17 +42,17 @@ FEATURE_NAMES = [
     "choch_1h",                  # [NEW v2.3]
     "msb_15m_confirmed",         # [NEW v2.3]
     "mtf_confluence",
-    # 価格・ボラティリティ系 (10)
+    # 価格・ボラティリティ系 (6)
     "atr_14",
     "atr_ratio",
     "bb_width",
     "close_vs_ema20_4h",
     "close_vs_ema50_4h",
     "high_low_range_15m",
-    "spread_pips",
-    "session_flag",
-    "hour_of_day",
-    "day_of_week",
+    # トレンド・モメンタム補助 (3)
+    "trend_direction",
+    "momentum_long",
+    "momentum_short",
     # モメンタム系 (7)
     "macd_histogram",
     "macd_signal_cross",
@@ -78,7 +76,7 @@ FEATURE_NAMES = [
     "sentiment_score",
 ]
 
-assert len(FEATURE_NAMES) == 36, f"Expected 36 features, got {len(FEATURE_NAMES)}"
+assert len(FEATURE_NAMES) == 35, f"Expected 35 features, got {len(FEATURE_NAMES)}"
 
 # LightGBM 学習パラメータ（設計書 確定値）
 LGBM_PARAMS = {
@@ -132,7 +130,7 @@ def build_features(
     calendar_risk_score: int = 0,
 ) -> np.ndarray:
     """
-    36特徴量ベクトルを構築する。
+    35特徴量ベクトルを構築する。
 
     Args:
         smc_data: TradingView Webhook から受け取った SMC データ
@@ -142,15 +140,8 @@ def build_features(
         calendar_risk_score: 経済指標リスクスコア (0/1/2)
 
     Returns:
-        shape=(1, 36) の numpy 配列
+        shape=(1, 35) の numpy 配列
     """
-    now = now_utc()
-    jst_now = to_jst(now)
-
-    # session_flag は core.time_manager から取得
-    from core.time_manager import get_session_flag
-    session = get_session_flag(now)
-
     features = [
         # SMC フラグ (8)
         int(smc_data.get("fvg_4h_zone_active", False)),
@@ -168,10 +159,10 @@ def build_features(
         market_data.get("close_vs_ema20_4h", 0.0),
         market_data.get("close_vs_ema50_4h", 0.0),
         market_data.get("high_low_range_15m", 0.0),
-        market_data.get("spread_pips", 1.5),
-        session,
-        jst_now.hour,           # hour_of_day: JST（表示基準）
-        now.weekday(),          # day_of_week: UTC基準
+        # トレンド・モメンタム補助
+        float(smc_data.get("trend_direction", 0)),
+        float(smc_data.get("momentum_long", 0)),
+        float(smc_data.get("momentum_short", 0)),
         # モメンタム系
         market_data.get("macd_histogram", 0.0),
         market_data.get("macd_signal_cross", 0),
@@ -232,7 +223,7 @@ class LGBMPredictor:
 
         Args:
             pair: 通貨ペア
-            features: shape=(1, 32) の特徴量配列
+            features: shape=(1, 35) の特徴量配列
 
         Returns:
             PredictionResult or None（モデル未読み込み時）

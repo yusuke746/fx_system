@@ -40,7 +40,7 @@ i_bb_len         = input.int(20,           "BB期間")
 i_bb_mult        = input.float(2.0,        "BB乗数")
 i_session_start  = input.int(7,            "セッション開始 UTC時")
 i_session_end    = input.int(21,           "セッション終了 UTC時")
-i_confluence_min = input.int(2,            "MTF合致最低スコア",    minval=1, maxval=5)
+i_confluence_min = input.int(1, "MTF合致最低スコア", minval=1, maxval=5, tooltip="LightGBMで選別するため1で広く拾う。スコア自体はJSONで送信済み。")
 i_swing_lookback = input.int(5,            "Swing ルックバック (1H)")
 i_swing_15m      = input.int(3,            "Swing ルックバック (15M) [NEW]")
 i_webhook_token  = input.string("",        "Webhook共有トークン", tooltip=".env の WEBHOOK_SECRET と同じ値")
@@ -420,24 +420,18 @@ vol_ok         = atr_14 > atr_avg_20 * 0.8 and not bb_squeeze
 momentum_long  = macd_cross_up   or rsi_oversold
 momentum_short = macd_cross_down or rsi_overbought
 
-// === ロングエントリー ===
-// 4H上位トレンド方向 + 1H Bullish Sweep後15M MSB確認 → 逆張りエントリー精度向上
-long_condition =
-     trend_bullish                         and  // 【必須】4H方向フィルター
-     msb_15m_bull                          and  // 【必須・NEW】15M MSBトリガー確認
-     mtf_confluence >= i_confluence_min    and  // 【必須】MTF合致スコア
-     vol_ok                                and  // 【必須】ボラティリティ確認
-     in_session and not is_friday_late     and  // 【必須】セッションフィルター
-     momentum_long                              // 【推奨】モメンタム確認
+// SMC的に意味のある動きが「何か1つ」あればPythonへ送る
+// 判断はLightGBMに委譲 → trend方向・momentum条件は特徴量として送る
 
-// === ショートエントリー ===
-short_condition =
-     trend_bearish                         and
-     msb_15m_bear                          and  // 【必須・NEW】
-     mtf_confluence >= i_confluence_min    and
-     vol_ok                                and
-     in_session and not is_friday_late     and
-     momentum_short
+// ロング候補: 15M MSB or 1H ChoCH or 1H BOS のいずれか
+smc_bull_trigger = msb_15m_bull or choch_1h_bull or bos_1h_bull
+
+// ショート候補: 15M MSB or 1H ChoCH or 1H BOS のいずれか
+smc_bear_trigger = msb_15m_bear or choch_1h_bear or bos_1h_bear
+
+long_condition = smc_bull_trigger and mtf_confluence >= i_confluence_min and vol_ok and in_session and not is_friday_late
+
+short_condition = smc_bear_trigger and mtf_confluence >= i_confluence_min and vol_ok and in_session and not is_friday_late
 
 
 // =====================================================
@@ -452,9 +446,12 @@ short_condition =
 // ※ グローバル変数に直接アクセス（Pine Script v5仕様）
 f_build_json(dir, msb_conf, choch_flag) =>
     _mc = macd_cross_up ? 1 : (macd_cross_down ? -1 : 0)
+    _trend_str = trend_bullish ? 1 : (trend_bearish ? -1 : 0)
+    _mom_l = momentum_long ? 1 : 0
+    _mom_s = momentum_short ? 1 : 0
     _p1 = '{"pair":"' + i_pair + '","direction":"' + dir + '","webhook_token":"' + i_webhook_token + '","msb_15m_confirmed":' + str.tostring(msb_conf) + ',"choch_1h":' + str.tostring(choch_flag)
     _p2 = ',"fvg_4h_zone_active":' + str.tostring(fvg_4h_zone_active) + ',"ob_4h_zone_active":' + str.tostring(ob_4h_zone_active) + ',"liq_sweep_1h":' + str.tostring(liq_sweep_1h) + ',"liq_sweep_qualified":' + str.tostring(liq_sweep_qualified) + ',"bos_1h":' + str.tostring(bos_1h)
-    _p3 = ',"mtf_confluence":' + str.tostring(mtf_confluence) + ',"atr":' + str.tostring(math.round(atr_14, 5)) + ',"close":' + str.tostring(math.round(close, 5)) + ',"atr_ratio":' + str.tostring(math.round(atr_ratio, 4)) + ',"bb_width":' + str.tostring(math.round(bb_width, 4))
+    _p3 = ',"mtf_confluence":' + str.tostring(mtf_confluence) + ',"trend_direction":' + str.tostring(_trend_str) + ',"momentum_long":' + str.tostring(_mom_l) + ',"momentum_short":' + str.tostring(_mom_s) + ',"atr":' + str.tostring(math.round(atr_14, 5)) + ',"close":' + str.tostring(math.round(close, 5)) + ',"atr_ratio":' + str.tostring(math.round(atr_ratio, 4)) + ',"bb_width":' + str.tostring(math.round(bb_width, 4))
     _p4 = ',"rsi_14":' + str.tostring(math.round(rsi_14, 2)) + ',"rsi_zone":' + str.tostring(rsi_zone) + ',"macd_histogram":' + str.tostring(math.round(macd_hist, 6)) + ',"macd_signal_cross":' + str.tostring(_mc)
     _p5 = ',"stoch_k":' + str.tostring(math.round(stoch_k, 2)) + ',"stoch_d":' + str.tostring(math.round(stoch_d, 2)) + ',"momentum_3bar":' + str.tostring(math.round(momentum_3bar, 4))
     _p6 = ',"close_vs_ema20_4h":' + str.tostring(math.round(close_vs_ema20_4h, 4)) + ',"close_vs_ema50_4h":' + str.tostring(math.round(close_vs_ema50_4h, 4)) + ',"high_low_range_15m":' + str.tostring(math.round(high_low_range_15m, 5))
@@ -498,17 +495,20 @@ plotshape(short_condition, style=shape.triangledown,
      location=location.abovebar, color=color.red,   size=size.normal, title="Short Signal")
 
 // [UPDATE] Sweep マーカー（強度フィルター通過済みのみ強調）
-plotshape(liq_sweep_bull_1h and sweep_strength >= i_sweep_min_str,
+plotshape(sweep_bull_started and sweep_strength >= i_sweep_min_str,
      style=shape.diamond, location=location.belowbar,
      color=color.new(color.lime, 20), size=size.small, title="1H Bull Sweep (Qualified)")
-plotshape(liq_sweep_bear_1h and sweep_strength >= i_sweep_min_str,
+plotshape(sweep_bear_started and sweep_strength >= i_sweep_min_str,
      style=shape.diamond, location=location.abovebar,
      color=color.new(color.fuchsia, 20), size=size.small, title="1H Bear Sweep (Qualified)")
 // 強度不足のSweep（フィルターで除外されたもの）
-plotshape(liq_sweep_bull_1h and sweep_strength < i_sweep_min_str,
+weak_bull_started = liq_sweep_bull_1h and not liq_sweep_bull_1h[1]
+weak_bear_started = liq_sweep_bear_1h and not liq_sweep_bear_1h[1]
+
+plotshape(weak_bull_started and sweep_strength < i_sweep_min_str,
      style=shape.diamond, location=location.belowbar,
      color=color.new(color.lime, 70), size=size.tiny, title="1H Bull Sweep (Weak)")
-plotshape(liq_sweep_bear_1h and sweep_strength < i_sweep_min_str,
+plotshape(weak_bear_started and sweep_strength < i_sweep_min_str,
      style=shape.diamond, location=location.abovebar,
      color=color.new(color.fuchsia, 70), size=size.tiny, title="1H Bear Sweep (Weak)")
 
@@ -519,17 +519,23 @@ plotshape(msb_15m_bear, style=shape.arrowdown, location=location.abovebar,
      color=color.new(color.orange, 10), size=size.small, title="15M MSB Bear (Trigger)")
 
 // BOS マーカー（ChoCHと分離表示）
-plotshape(bos_1h_bull and not choch_1h_bull,
+bos_bull_started = bos_1h_bull and not bos_1h_bull[1]
+bos_bear_started = bos_1h_bear and not bos_1h_bear[1]
+
+plotshape(bos_bull_started and not choch_1h_bull,
      style=shape.cross, location=location.abovebar,
      color=color.new(color.teal, 30), size=size.tiny, title="1H BOS Bull (Continuation)")
-plotshape(bos_1h_bear and not choch_1h_bear,
+plotshape(bos_bear_started and not choch_1h_bear,
      style=shape.cross, location=location.belowbar,
      color=color.new(color.orange, 30), size=size.tiny, title="1H BOS Bear (Continuation)")
 
 // [NEW] ChoCHマーカー（転換シグナル = より目立つ表示）
-plotshape(choch_1h_bull, style=shape.xcross, location=location.abovebar,
+choch_bull_started = choch_1h_bull and not choch_1h_bull[1]
+choch_bear_started = choch_1h_bear and not choch_1h_bear[1]
+
+plotshape(choch_bull_started, style=shape.xcross, location=location.abovebar,
      color=color.new(color.green, 0), size=size.small, title="1H ChoCH Bull (Reversal)")
-plotshape(choch_1h_bear, style=shape.xcross, location=location.belowbar,
+plotshape(choch_bear_started, style=shape.xcross, location=location.belowbar,
      color=color.new(color.red, 0),   size=size.small, title="1H ChoCH Bear (Reversal)")
 
 // MTFスコア + 状態ラベル（最終バーのみ）
