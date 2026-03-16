@@ -162,6 +162,9 @@ class LLMClient:
             llm_cfg.get("reasoning_effort_instant", "low"),
         )
         self._instant_reasoning_effort = llm_cfg.get("reasoning_effort_instant", "low")
+        self._web_search_enabled = bool(llm_cfg.get("web_search_enabled", True))
+        self._web_search_tool_type = llm_cfg.get("web_search_tool_type", "web_search_preview")
+        self._web_search_context_size = llm_cfg.get("web_search_context_size", "low")
 
     def _as_bool(self, value: object) -> bool:
         if isinstance(value, bool):
@@ -169,6 +172,19 @@ class LLMClient:
         if isinstance(value, str):
             return value.strip().lower() in {"true", "1", "yes", "y"}
         return bool(value)
+
+    def _is_tool_not_supported_error(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            "tool" in msg
+            and ("not support" in msg or "invalid" in msg or "unknown" in msg)
+        ) or "web_search" in msg
+
+    def _build_web_search_tools(self) -> list[dict]:
+        return [{
+            "type": self._web_search_tool_type,
+            "search_context_size": self._web_search_context_size,
+        }]
 
     async def _analyze_with_model(
         self,
@@ -179,6 +195,7 @@ class LLMClient:
         model: str,
         reasoning_effort: str,
         mode: str,
+        use_web_search: bool = False,
     ) -> SentimentResult:
         prompt = self._build_prompt(pair, news_articles, market_context)
         messages = [
@@ -186,11 +203,30 @@ class LLMClient:
             {"role": "user", "content": prompt},
         ]
 
-        response = await self._client.responses.create(
-            model=model,
-            input=messages,
-            reasoning={"effort": reasoning_effort},
-        )
+        request_kwargs = {
+            "model": model,
+            "input": messages,
+            "reasoning": {"effort": reasoning_effort},
+        }
+
+        response = None
+        if use_web_search and self._web_search_enabled:
+            try:
+                response = await self._client.responses.create(
+                    **request_kwargs,
+                    tools=self._build_web_search_tools(),
+                )
+            except Exception as web_search_error:
+                if self._is_tool_not_supported_error(web_search_error):
+                    logger.warning(
+                        f"web_search unavailable for model={model}. "
+                        f"Fallback to no-web-search. err={web_search_error}"
+                    )
+                else:
+                    raise
+
+        if response is None:
+            response = await self._client.responses.create(**request_kwargs)
 
         text = ""
         for item in response.output:
@@ -257,6 +293,7 @@ class LLMClient:
                 model=self._instant_model,
                 reasoning_effort=self._instant_reasoning_effort,
                 mode="deep",
+                use_web_search=True,
             )
 
             logger.info(
@@ -295,16 +332,41 @@ class LLMClient:
         if not llm_cfg.get("hybrid_enabled", True):
             return await self.analyze_sentiment(pair, news_articles, market_context, reason)
 
+        def _is_model_not_found_error(exc: Exception) -> bool:
+            msg = str(exc).lower()
+            return "model_not_found" in msg or "does not exist" in msg
+
         try:
-            quick = await self._analyze_with_model(
-                pair=pair,
-                news_articles=news_articles,
-                market_context=market_context,
-                reason=f"{reason}:quick",
-                model=self._diff_model,
-                reasoning_effort=self._analysis_reasoning_effort,
-                mode="quick",
-            )
+            try:
+                quick = await self._analyze_with_model(
+                    pair=pair,
+                    news_articles=news_articles,
+                    market_context=market_context,
+                    reason=f"{reason}:quick",
+                    model=self._diff_model,
+                    reasoning_effort=self._analysis_reasoning_effort,
+                    mode="quick",
+                    use_web_search=True,
+                )
+            except Exception as quick_error:
+                if not _is_model_not_found_error(quick_error):
+                    raise
+                logger.warning(
+                    f"LLM quick model unavailable: {self._diff_model}. "
+                    f"Falling back to deep model {self._instant_model}."
+                )
+                quick = await self._analyze_with_model(
+                    pair=pair,
+                    news_articles=news_articles,
+                    market_context=market_context,
+                    reason=f"{reason}:quick_fallback",
+                    model=self._instant_model,
+                    reasoning_effort=self._instant_reasoning_effort,
+                    mode="deep",
+                    use_web_search=True,
+                )
+                quick.escalated = True
+                return quick
 
             threshold = float(llm_cfg.get("news_importance_escalation_threshold", 0.65))
             escalate = quick.news_importance_score >= threshold or quick.unexpected_veto
@@ -322,6 +384,7 @@ class LLMClient:
                 model=self._instant_model,
                 reasoning_effort=self._instant_reasoning_effort,
                 mode="deep",
+                use_web_search=True,
             )
             deep.escalated = True
             deep.news_importance_score = max(deep.news_importance_score, quick.news_importance_score)
@@ -417,6 +480,7 @@ class LLMClient:
     def _estimate_cost(self, tokens_in: int, tokens_out: int, model_name: str) -> float:
         """定期ニュース判定用モデルのコスト概算。未定義モデルは model_instant 相当で保守的に扱う。"""
         pricing = {
+            "gpt-5-nano": (0.05, 0.4),
             "gpt-5.2-nano": (0.2, 1.6),
             "gpt-5.2": (1.75, 14.0),
         }

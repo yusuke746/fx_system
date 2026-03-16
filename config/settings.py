@@ -61,11 +61,14 @@ def _normalize_trading_config(config: dict) -> dict:
     risk.setdefault("time_decay_min_profit_atr", 0.5)
 
     llm = config.setdefault("llm", {})
-    llm.setdefault("model_diff", llm.get("model_instant", "gpt-5.2"))
+    llm.setdefault("model_diff", "gpt-5-nano")
     llm.setdefault("reasoning_effort_diff", llm.get("reasoning_effort_instant", "low"))
     llm.setdefault("hybrid_enabled", True)
     llm.setdefault("news_importance_escalation_threshold", 0.65)
     llm.setdefault("feature_news_importance_threshold", 0.55)
+    llm.setdefault("web_search_enabled", True)
+    llm.setdefault("web_search_tool_type", "web_search_preview")
+    llm.setdefault("web_search_context_size", "low")
 
     return config
 

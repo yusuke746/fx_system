@@ -203,7 +203,18 @@ class LGBMPredictor:
             logger.warning(f"Model file not found: {model_path}")
             return False
         try:
-            self._models[pair] = joblib.load(model_path)
+            model = joblib.load(model_path)
+
+            expected_features = len(FEATURE_NAMES)
+            model_features = getattr(model, "n_features_in_", None)
+            if model_features is not None and int(model_features) != expected_features:
+                logger.error(
+                    f"Model feature mismatch for {pair}: model={model_features}, expected={expected_features}. "
+                    f"Please retrain or regenerate model file: {model_path}"
+                )
+                return False
+
+            self._models[pair] = model
             logger.info(f"Model loaded for {pair}: {model_path}")
             return True
         except Exception as e:
@@ -247,7 +258,10 @@ class LGBMPredictor:
             )
             return result
         except Exception as e:
-            logger.error(f"LightGBM prediction error for {pair}: {e}")
+            logger.error(
+                f"LightGBM prediction error for {pair}: {e}. "
+                f"Hint: verify model was trained with {len(FEATURE_NAMES)} features."
+            )
             return None
 
     def save_model(self, pair: str, model: object) -> None:
