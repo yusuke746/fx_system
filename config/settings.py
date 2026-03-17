@@ -57,8 +57,11 @@ def _normalize_trading_config(config: dict) -> dict:
 
     # 新しいダイナミック・エグジット戦略の既定値。
     risk.setdefault("exit_prob_threshold", 0.35)
+    risk.setdefault("exit_prob_stale_minutes", 30)
     risk.setdefault("time_decay_minutes", 60)
     risk.setdefault("time_decay_min_profit_atr", 0.5)
+    risk.setdefault("trailing_update_cooldown_seconds", 30)
+    risk.setdefault("trailing_min_step_pips", 2.0)
 
     llm = config.setdefault("llm", {})
     llm.setdefault("model_diff", "gpt-5-nano")
@@ -69,6 +72,12 @@ def _normalize_trading_config(config: dict) -> dict:
     llm.setdefault("web_search_enabled", True)
     llm.setdefault("web_search_tool_type", "web_search_preview")
     llm.setdefault("web_search_context_size", "low")
+
+    ml = config.setdefault("ml", {})
+    ml.setdefault("label_horizon_minutes", 240)
+    ml.setdefault("min_samples_per_pair", 300)
+    ml.setdefault("min_directional_samples", 30)
+    ml.setdefault("min_cv_accuracy", 0.40)
 
     return config
 

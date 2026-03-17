@@ -190,7 +190,10 @@ def retrain_models_from_db(
 ) -> dict:
     """DBのラベル済みサンプルから通貨ペア別に再学習する。"""
     config = get_trading_config()
+    ml_cfg = config.get("ml", {})
     pairs = config["system"]["pairs"]
+    min_directional_samples = int(ml_cfg.get("min_directional_samples", 30))
+    min_cv_accuracy = float(ml_cfg.get("min_cv_accuracy", 0.40))
 
     result = {
         "trained_pairs": [],
@@ -207,7 +210,26 @@ def retrain_models_from_db(
             continue
 
         X, y = _build_xy(rows)
+
+        class_counts = np.bincount(y, minlength=3)
+        up_count = int(class_counts[0])
+        flat_count = int(class_counts[1])
+        down_count = int(class_counts[2])
+        if up_count < min_directional_samples or down_count < min_directional_samples:
+            logger.warning(
+                f"Directional sample imbalance for {pair}: "
+                f"up={up_count}, flat={flat_count}, down={down_count}, "
+                f"required={min_directional_samples}. Continue training (ML-priority mode)."
+            )
+
         val = walk_forward_validate(X, y)
+        cv_acc = float(val.get("accuracy", 0.0))
+        if cv_acc < min_cv_accuracy:
+            logger.warning(
+                f"Low CV accuracy for {pair}: {cv_acc:.4f}<{min_cv_accuracy:.4f}. "
+                f"Continue training (ML-priority mode)."
+            )
+
         train_model(X, y, pair=pair, model_dir=model_dir)
 
         result["trained_pairs"].append(pair)

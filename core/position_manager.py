@@ -61,6 +61,7 @@ class ManagedPosition:
     trailing_active: bool = True
     trailing_high: float = 0.0  # long の場合の最高値
     trailing_low: float = float("inf")  # short の場合の最安値
+    last_trailing_update_utc: datetime | None = None
 
 
 class PositionManager:
@@ -221,7 +222,10 @@ class PositionManager:
     def _should_exit_prob_decay(self, pos: ManagedPosition, risk: dict) -> bool:
         """最新予測の方向優位が消えたときに撤退する。"""
         threshold = float(risk.get("exit_prob_threshold", 0.35))
+        stale_minutes = float(risk.get("exit_prob_stale_minutes", 30))
         if pos.last_prediction_at_utc is None:
+            return False
+        if elapsed_minutes(pos.last_prediction_at_utc) > stale_minutes:
             return False
         if pos.direction == "long":
             return pos.prob_up < threshold
@@ -259,21 +263,31 @@ class PositionManager:
     ) -> None:
         """トレーリングストップ: 高値/安値更新ごとに ATR倍率で追従する。"""
         trail_dist = pos.atr_at_entry * risk.get("trailing_atr_multiplier", 0.8)
+        cooldown_seconds = float(risk.get("trailing_update_cooldown_seconds", 30))
+        min_step_pips = float(risk.get("trailing_min_step_pips", 2.0))
+        pip_unit = 0.01 if pos.pair in ("USDJPY", "GBPJPY") else 0.0001
+        min_step_price = max(0.0, min_step_pips * pip_unit)
+
+        if pos.last_trailing_update_utc is not None:
+            if elapsed_seconds(pos.last_trailing_update_utc) < cooldown_seconds:
+                return
 
         if pos.direction == "long":
             if current_price > pos.trailing_high:
                 pos.trailing_high = current_price
                 new_sl = current_price - trail_dist
-                if new_sl > pos.sl_price:
+                if new_sl > pos.sl_price + min_step_price:
                     await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
                     pos.sl_price = new_sl
+                    pos.last_trailing_update_utc = now_utc()
         else:
             if current_price < pos.trailing_low:
                 pos.trailing_low = current_price
                 new_sl = current_price + trail_dist
-                if new_sl < pos.sl_price:
+                if new_sl < pos.sl_price - min_step_price:
                     await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
                     pos.sl_price = new_sl
+                    pos.last_trailing_update_utc = now_utc()
 
     async def _force_close(self, pos: ManagedPosition, reason: str, close_price: float | None = None) -> None:
         """強制クローズ実行。"""

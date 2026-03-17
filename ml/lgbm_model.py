@@ -101,9 +101,9 @@ class PredictionResult:
     @property
     def direction(self) -> str:
         """最大確率の方向を返す。"""
-        if self.prob_up >= self.prob_flat and self.prob_up >= self.prob_down:
+        if self.prob_up > self.prob_flat and self.prob_up > self.prob_down:
             return "long"
-        if self.prob_down >= self.prob_flat and self.prob_down >= self.prob_up:
+        if self.prob_down > self.prob_flat and self.prob_down > self.prob_up:
             return "short"
         return "flat"
 

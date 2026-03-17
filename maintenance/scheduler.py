@@ -38,7 +38,7 @@ from loguru import logger
 
 from core.database import check_integrity
 from core.notifier import DiscordNotifier
-from core.time_manager import now_utc, format_jst, is_broker_market_closed
+from core.time_manager import now_utc, format_jst, is_broker_market_closed, broker_day_start_utc
 from ml.retraining import run_weekly_retraining
 
 
@@ -127,24 +127,28 @@ async def weekly_maintenance(
     logger.info("DB VACUUM completed")
 
     # 4. api_call_log 週次集計
-    week_start = (now - timedelta(days=7)).isoformat()
+    # 実行遅延による窓ズレを防ぐため、ブローカー日付の固定境界で集計する。
+    week_end_utc = broker_day_start_utc(now)   # 当日00:00（broker）
+    week_start_utc = week_end_utc - timedelta(days=7)
+    week_start = week_start_utc.isoformat()
+    week_end = week_end_utc.isoformat()
     row = db_conn.execute(
         "SELECT COUNT(*) as cnt, COALESCE(SUM(cost_usd), 0) as total_cost "
-        "FROM api_call_log WHERE call_time >= ?",
-        (week_start,),
+        "FROM api_call_log WHERE call_time >= ? AND call_time < ?",
+        (week_start, week_end),
     ).fetchone()
 
     # 5. 週次レポート
     trades_row = db_conn.execute(
         "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl_jpy), 0) as total_pnl, "
         "COALESCE(AVG(pnl_pips), 0) as avg_pips "
-        "FROM trades WHERE close_time >= ?",
-        (week_start,),
+        "FROM trades WHERE close_time >= ? AND close_time < ?",
+        (week_start, week_end),
     ).fetchone()
 
     win_trades = db_conn.execute(
-        "SELECT COUNT(*) as cnt FROM trades WHERE close_time >= ? AND pnl_pips > 0",
-        (week_start,),
+        "SELECT COUNT(*) as cnt FROM trades WHERE close_time >= ? AND close_time < ? AND pnl_pips > 0",
+        (week_start, week_end),
     ).fetchone()
 
     total_trades = trades_row["cnt"]

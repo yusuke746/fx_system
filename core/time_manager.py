@@ -159,11 +159,11 @@ def is_excluded_hours(dt: datetime | None = None) -> bool:
 
 
 def is_friday_close_window(dt: datetime | None = None) -> bool:
-    """金曜22:00 JST（=13:00 UTC）以降かどうかを時間ベース強制クローズ用に判定。"""
+    """金曜22:00（ブローカー時刻）以降かどうかを時間ベース強制クローズ用に判定。"""
     if dt is None:
         dt = now_utc()
-    jst_dt = to_jst(dt)
-    return jst_dt.weekday() == 4 and jst_dt.hour >= 22
+    broker_dt = utc_to_mt5_server(dt)
+    return broker_dt.weekday() == 4 and broker_dt.hour >= 22
 
 
 def is_broker_market_closed(dt: datetime | None = None) -> bool:
@@ -180,10 +180,10 @@ def is_broker_market_closed(dt: datetime | None = None) -> bool:
     """
     if dt is None:
         dt = now_utc()
-        broker_dt = utc_to_mt5_server(dt)
+    broker_dt = utc_to_mt5_server(dt)
 
-        wd = broker_dt.weekday()  # Mon=0 ... Sun=6
-        hour = broker_dt.hour
+    wd = broker_dt.weekday()  # Mon=0 ... Sun=6
+    hour = broker_dt.hour
 
     if wd == 4 and hour >= 22:  # Fri late
         return True

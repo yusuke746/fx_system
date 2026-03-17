@@ -282,7 +282,7 @@ def insert_optimization(conn: sqlite3.Connection, opt: dict) -> int:
            (optimized_at, optimize_window_days, validate_window_days,
             sl_multiplier, exit_prob_threshold, time_decay_minutes, time_decay_min_profit_atr,
             sharpe_optimize, sharpe_validate, sample_count, was_applied, rollback_reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             now_utc().isoformat(),
             opt["optimize_window_days"],

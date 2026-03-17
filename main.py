@@ -743,6 +743,20 @@ class Orchestrator:
         from maintenance.scheduler import weekly_maintenance
         await weekly_maintenance(self._db_conn, self._notifier)
 
+        # 執行ノイズ抑制パラメータの週次自動チューニング（AI判定ロジックは変更しない）
+        from optimizer.weekend_optimizer import auto_tune_execution_noise
+        tune_result = auto_tune_execution_noise(self._db_conn)
+        if tune_result.get("applied"):
+            reload_trading_config()
+            self._risk_config = load_risk_config(get_trading_config())
+            await self._notifier.send(
+                "執行ノイズ最適化を適用しました\n"
+                f"new: {tune_result.get('new')}\n"
+                f"metrics: {tune_result.get('metrics')}"
+            )
+        else:
+            logger.info(f"Execution noise tuning skipped: {tune_result.get('reason', 'N/A')}")
+
         # 週次メンテ後に最新モデルを再読み込み
         reload_result = self._predictor.load_all_models()
         trained_pairs = [p for p, ok in reload_result.items() if ok]
