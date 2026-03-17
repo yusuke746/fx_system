@@ -429,9 +429,9 @@ smc_bull_trigger = msb_15m_bull or choch_1h_bull or bos_1h_bull
 // ショート候補: 15M MSB or 1H ChoCH or 1H BOS のいずれか
 smc_bear_trigger = msb_15m_bear or choch_1h_bear or bos_1h_bear
 
-long_condition = smc_bull_trigger and mtf_confluence >= i_confluence_min and vol_ok and in_session and not is_friday_late
+long_condition = smc_bull_trigger and mtf_confluence >= i_confluence_min and vol_ok
 
-short_condition = smc_bear_trigger and mtf_confluence >= i_confluence_min and vol_ok and in_session and not is_friday_late
+short_condition = smc_bear_trigger and mtf_confluence >= i_confluence_min and vol_ok
 
 
 // =====================================================

@@ -7,6 +7,7 @@ DB管理モジュール
 
 import sqlite3
 import time
+import threading
 from pathlib import Path
 
 from loguru import logger
@@ -16,6 +17,7 @@ from core.time_manager import now_utc, broker_day_start_utc
 
 _WRITE_RETRIES = 5
 _WRITE_RETRY_DELAY_SEC = 0.2
+_DB_WRITE_LOCK = threading.RLock()
 
 
 def _is_sqlite_locked_error(exc: sqlite3.OperationalError) -> bool:
@@ -24,26 +26,28 @@ def _is_sqlite_locked_error(exc: sqlite3.OperationalError) -> bool:
 
 
 def _execute_with_retry(conn: sqlite3.Connection, query: str, params: tuple = ()) -> sqlite3.Cursor:
-    for attempt in range(_WRITE_RETRIES):
-        try:
-            return conn.execute(query, params)
-        except sqlite3.OperationalError as e:
-            if _is_sqlite_locked_error(e) and attempt < _WRITE_RETRIES - 1:
-                time.sleep(_WRITE_RETRY_DELAY_SEC * (attempt + 1))
-                continue
-            raise
+    with _DB_WRITE_LOCK:
+        for attempt in range(_WRITE_RETRIES):
+            try:
+                return conn.execute(query, params)
+            except sqlite3.OperationalError as e:
+                if _is_sqlite_locked_error(e) and attempt < _WRITE_RETRIES - 1:
+                    time.sleep(_WRITE_RETRY_DELAY_SEC * (attempt + 1))
+                    continue
+                raise
 
 
 def _commit_with_retry(conn: sqlite3.Connection) -> None:
-    for attempt in range(_WRITE_RETRIES):
-        try:
-            conn.commit()
-            return
-        except sqlite3.OperationalError as e:
-            if _is_sqlite_locked_error(e) and attempt < _WRITE_RETRIES - 1:
-                time.sleep(_WRITE_RETRY_DELAY_SEC * (attempt + 1))
-                continue
-            raise
+    with _DB_WRITE_LOCK:
+        for attempt in range(_WRITE_RETRIES):
+            try:
+                conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                if _is_sqlite_locked_error(e) and attempt < _WRITE_RETRIES - 1:
+                    time.sleep(_WRITE_RETRY_DELAY_SEC * (attempt + 1))
+                    continue
+                raise
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:

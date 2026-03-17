@@ -38,7 +38,7 @@ from loguru import logger
 
 from core.database import check_integrity
 from core.notifier import DiscordNotifier
-from core.time_manager import now_utc, format_jst
+from core.time_manager import now_utc, format_jst, is_broker_market_closed
 from ml.retraining import run_weekly_retraining
 
 
@@ -66,7 +66,7 @@ async def daily_maintenance(
     # 4. カレンダーキャッシュ更新
     if calendar_veto:
         try:
-            calendar_veto.fetch_events()
+            await calendar_veto.fetch_events_async()
             logger.info("Calendar cache updated")
         except Exception as e:
             await notifier.send_alert(f"カレンダー更新失敗: {e}")
@@ -95,7 +95,16 @@ async def weekly_maintenance(
     now = now_utc()
 
     # 0. LightGBM 再学習（未ラベル→ラベル付け→再学習）
-    retrain_result = run_weekly_retraining(db_conn)
+    # MT5 API 競合を避けるため、市場クローズ時のみ実行する。
+    if is_broker_market_closed(now):
+        retrain_result = run_weekly_retraining(db_conn)
+    else:
+        retrain_result = {
+            "labeling": {"labeled": 0, "skipped": 0, "error": "skipped_market_open"},
+            "retrain": {"trained_pairs": [], "skipped_pairs": {}, "validation": {}},
+            "run_at_utc": now.isoformat(),
+        }
+        logger.warning("Weekly retraining skipped because broker market is open")
 
     # 1. training_samples クリーンアップ（label済み180日超）
     training_cutoff = (now - timedelta(days=180)).isoformat()

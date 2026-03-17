@@ -145,7 +145,7 @@ class Orchestrator:
 
         # カレンダー取得
         try:
-            self._calendar_veto.fetch_events()
+            await self._calendar_veto.fetch_events_async()
         except Exception as e:
             logger.warning(f"Initial calendar fetch failed: {e}")
 
@@ -306,7 +306,7 @@ class Orchestrator:
 
         # 時間フィルター
         if is_excluded_hours():
-            logger.info("Signal rejected: excluded hours (00:00-07:00 JST)")
+            logger.info("Signal rejected: excluded broker hours (00:00-07:00 server time)")
             insert_signal(self._db_conn, {
                 "pair": pair,
                 "signal_time": now_utc(),
@@ -427,6 +427,26 @@ class Orchestrator:
                 f"Signal not strong enough: {prediction.prob_up:.2f}/"
                 f"{prediction.prob_flat:.2f}/{prediction.prob_down:.2f}"
             )
+            return
+
+        # flat は方向性なし。エントリー/ドテン対象にしない。
+        if prediction.direction == "flat":
+            logger.info(
+                f"Signal skipped: flat direction "
+                f"({prediction.prob_up:.2f}/{prediction.prob_flat:.2f}/{prediction.prob_down:.2f})"
+            )
+            insert_signal(self._db_conn, {
+                "pair": pair,
+                "signal_time": now_utc(),
+                "direction": direction,
+                "lgbm_prob_up": prediction.prob_up,
+                "lgbm_prob_flat": prediction.prob_flat,
+                "lgbm_prob_down": prediction.prob_down,
+                "gpt_sentiment": sentiment_score,
+                "mtf_confluence": payload.get("mtf_confluence"),
+                "executed": False,
+                "veto_reason": "flat_signal",
+            })
             return
 
         # ⑤ ドテン判定

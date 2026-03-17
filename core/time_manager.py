@@ -147,12 +147,15 @@ def get_session_flag(dt: datetime | None = None) -> int:
 
 def is_excluded_hours(dt: datetime | None = None) -> bool:
     """
-    深夜帯（00:00〜07:00 JST / 15:00〜22:00 UTC）でエントリーを除外すべきか判定。
+    深夜帯（ブローカー時刻 00:00〜07:00）でエントリーを除外すべきか判定。
+
+    ブローカーサーバー時刻（EET/EEST）を基準にすることで、
+    DST切替時でも除外時間の意図を一定に保つ。
     """
     if dt is None:
         dt = now_utc()
-    jst_hour = to_jst(dt).hour
-    return 0 <= jst_hour < 7
+    broker_hour = utc_to_mt5_server(dt).hour
+    return 0 <= broker_hour < 7
 
 
 def is_friday_close_window(dt: datetime | None = None) -> bool:
@@ -165,19 +168,22 @@ def is_friday_close_window(dt: datetime | None = None) -> bool:
 
 def is_broker_market_closed(dt: datetime | None = None) -> bool:
     """
-    ブローカー基準で市場クローズ時間かどうかを判定する（JST基準）。
+        ブローカー基準で市場クローズ時間かどうかを判定する（EET/EEST基準）。
+
+        Europe/Helsinki のタイムゾーン変換を使うため、
+        夏時間（EEST）/冬時間（EET）のズレは自動補正される。
 
     運用ルール:
-      - 金曜 22:00 JST 以降はクローズ
-      - 土曜・日曜はクローズ
-      - 月曜 07:00 JST までクローズ
+            - 金曜 22:00（サーバー時刻）以降はクローズ
+            - 土曜・日曜はクローズ
+            - 月曜 07:00（サーバー時刻）までクローズ
     """
     if dt is None:
         dt = now_utc()
-    jst_dt = to_jst(dt)
+        broker_dt = utc_to_mt5_server(dt)
 
-    wd = jst_dt.weekday()  # Mon=0 ... Sun=6
-    hour = jst_dt.hour
+        wd = broker_dt.weekday()  # Mon=0 ... Sun=6
+        hour = broker_dt.hour
 
     if wd == 4 and hour >= 22:  # Fri late
         return True

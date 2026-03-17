@@ -12,10 +12,12 @@ FOMC・雇用統計等の前後30分をブロックする。
 """
 
 import importlib
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import requests
 from loguru import logger
 
@@ -69,6 +71,40 @@ class CalendarVeto:
 
         logger.warning("Calendar fetch returned 0 events. Keeping previous cache and freshness.")
         return self._events
+
+    async def fetch_events_async(self) -> list[dict]:
+        """
+        Forex Factory XML を非同期で取得する。
+        同期版 fetch_events の互換として同じ戻り値を返す。
+        """
+        urls = [FOREX_FACTORY_URL, FOREX_FACTORY_NEXT_URL]
+        events: list[dict] = []
+
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            tasks = [self._fetch_one_async(session, url) for url in urls]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for url, result in zip(urls, results):
+            if isinstance(result, Exception):
+                logger.warning(f"Calendar fetch failed ({url}): {result}")
+                continue
+            events.extend(result)
+
+        if events:
+            self._events = events
+            self._last_fetch = now_utc()
+            logger.info(f"Calendar events fetched: {len(events)} high-impact events")
+            return events
+
+        logger.warning("Calendar fetch returned 0 events. Keeping previous cache and freshness.")
+        return self._events
+
+    async def _fetch_one_async(self, session: aiohttp.ClientSession, url: str) -> list[dict]:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            content = await resp.read()
+        return self._parse_xml(content)
 
     def _parse_xml(self, content: bytes) -> list[dict]:
         """XML をパースして高インパクトイベントを抽出する。"""

@@ -225,7 +225,9 @@ class PositionManager:
             return False
         if pos.direction == "long":
             return pos.prob_up < threshold
-        return pos.prob_down < threshold
+        if pos.direction == "short":
+            return pos.prob_down < threshold
+        return False
 
     def _should_exit_time_decay(
         self,
