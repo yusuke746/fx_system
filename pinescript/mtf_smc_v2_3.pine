@@ -42,6 +42,7 @@ i_bb_mult        = input.float(2.0,        "BB乗数")
 i_session_start  = input.int(7,            "セッション開始 UTC時")
 i_session_end    = input.int(21,           "セッション終了 UTC時")
 i_confluence_min = input.int(1, "MTF合致最低スコア", minval=1, maxval=5, tooltip="LightGBMで選別するため1で広く拾う。スコア自体はJSONで送信済み。")
+i_alert_mode     = input.string("ml_first", "アラート発火モード [NEW]", options=["ml_first", "strict"], tooltip="ml_first=SMCトリガー発生を広く送信（推奨）/ strict=従来ゲート（MTF+ボラ）通過時のみ送信")
 i_swing_lookback = input.int(5,            "Swing ルックバック (1H)")
 i_swing_15m      = input.int(3,            "Swing ルックバック (15M) [NEW]")
 i_webhook_token  = input.string("",        "Webhook共有トークン", tooltip=".env の WEBHOOK_SECRET と同じ値")
@@ -432,9 +433,20 @@ smc_bull_trigger = msb_15m_bull or choch_1h_bull or bos_1h_bull
 // ショート候補: 15M MSB or 1H ChoCH or 1H BOS のいずれか
 smc_bear_trigger = msb_15m_bear or choch_1h_bear or bos_1h_bear
 
-long_condition = smc_bull_trigger and mtf_confluence >= i_confluence_min and vol_ok
+strict_long_raw  = smc_bull_trigger and mtf_confluence >= i_confluence_min and vol_ok
+strict_short_raw = smc_bear_trigger and mtf_confluence >= i_confluence_min and vol_ok
 
-short_condition = smc_bear_trigger and mtf_confluence >= i_confluence_min and vol_ok
+ml_long_raw      = smc_bull_trigger
+ml_short_raw     = smc_bear_trigger
+
+long_raw  = i_alert_mode == "strict" ? strict_long_raw : ml_long_raw
+short_raw = i_alert_mode == "strict" ? strict_short_raw : ml_short_raw
+
+// アラート連打防止: 条件成立の立ち上がりのみ発火
+long_condition  = long_raw and not long_raw[1]
+short_condition = short_raw and not short_raw[1]
+
+quality_gate_pass = mtf_confluence >= i_confluence_min and vol_ok
 
 
 // =====================================================
@@ -460,7 +472,8 @@ f_build_json(dir, msb_conf, choch_flag) =>
     _p6 = ',"close_vs_ema20_4h":' + str.tostring(math.round(close_vs_ema20_4h, 4)) + ',"close_vs_ema50_4h":' + str.tostring(math.round(close_vs_ema50_4h, 4)) + ',"high_low_range_15m":' + str.tostring(math.round(high_low_range_15m, 5))
     _p7 = ',"ob_4h_distance_pips":' + str.tostring(math.round(ob_4h_distance, 4)) + ',"fvg_4h_fill_ratio":' + str.tostring(math.round(fvg_4h_fill_ratio, 4)) + ',"liq_sweep_strength":' + str.tostring(math.round(sweep_strength, 4))
     _p8 = ',"prior_candle_body_ratio":' + str.tostring(math.round(prior_candle_body_ratio, 4)) + ',"consecutive_same_dir":' + str.tostring(consecutive_same_dir) + ',"pivot_proximity":' + str.tostring(math.round(pivot_proximity, 4)) + ',"sweep_pending_bars":' + str.tostring(sweep_pending_bars)
-    _p1 + _p2 + _p3 + _p4 + _p5 + _p6 + _p7 + _p8 + '}'
+    _p9 = ',"vol_ok":' + str.tostring(vol_ok) + ',"quality_gate_pass":' + str.tostring(quality_gate_pass) + ',"in_session":' + str.tostring(in_session) + ',"is_friday_late":' + str.tostring(is_friday_late) + ',"alert_mode":"' + i_alert_mode + '"'
+    _p1 + _p2 + _p3 + _p4 + _p5 + _p6 + _p7 + _p8 + _p9 + '}'
 
 // アラート発火
 if long_condition

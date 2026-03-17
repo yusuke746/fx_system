@@ -276,6 +276,11 @@ class Orchestrator:
                 "signal_time": now_utc(),
                 "direction": direction,
                 "mtf_confluence": payload.get("mtf_confluence"),
+                "alert_mode": payload.get("alert_mode"),
+                "quality_gate_pass": payload.get("quality_gate_pass"),
+                "vol_ok": payload.get("vol_ok"),
+                "in_session": payload.get("in_session"),
+                "is_friday_late": payload.get("is_friday_late"),
                 "executed": False,
                 "veto_reason": veto_reason,
             })
@@ -299,6 +304,11 @@ class Orchestrator:
                 "direction": direction,
                 "gpt_sentiment": sentiment_score,
                 "mtf_confluence": payload.get("mtf_confluence"),
+                "alert_mode": payload.get("alert_mode"),
+                "quality_gate_pass": payload.get("quality_gate_pass"),
+                "vol_ok": payload.get("vol_ok"),
+                "in_session": payload.get("in_session"),
+                "is_friday_late": payload.get("is_friday_late"),
                 "executed": False,
                 "veto_reason": "gpt_unexpected_veto",
             })
@@ -312,6 +322,11 @@ class Orchestrator:
                 "signal_time": now_utc(),
                 "direction": direction,
                 "mtf_confluence": payload.get("mtf_confluence"),
+                "alert_mode": payload.get("alert_mode"),
+                "quality_gate_pass": payload.get("quality_gate_pass"),
+                "vol_ok": payload.get("vol_ok"),
+                "in_session": payload.get("in_session"),
+                "is_friday_late": payload.get("is_friday_late"),
                 "executed": False,
                 "veto_reason": "excluded_hours",
             })
@@ -376,6 +391,11 @@ class Orchestrator:
                 "max_dd_24h": 0.0,
                 "calendar_risk_score": calendar_risk_score,
                 "sentiment_score": sentiment_score,
+                "alert_mode": payload.get("alert_mode"),
+                "quality_gate_pass": payload.get("quality_gate_pass"),
+                "vol_ok": payload.get("vol_ok"),
+                "in_session": payload.get("in_session"),
+                "is_friday_late": payload.get("is_friday_late"),
             })
         except Exception as e:
             logger.warning(f"Training sample insert failed: {e}")
@@ -395,6 +415,11 @@ class Orchestrator:
                 "signal_time": now_utc(),
                 "direction": direction,
                 "mtf_confluence": payload.get("mtf_confluence"),
+                "alert_mode": payload.get("alert_mode"),
+                "quality_gate_pass": payload.get("quality_gate_pass"),
+                "vol_ok": payload.get("vol_ok"),
+                "in_session": payload.get("in_session"),
+                "is_friday_late": payload.get("is_friday_late"),
                 "executed": False,
                 "veto_reason": "model_unavailable",
             })
@@ -418,6 +443,11 @@ class Orchestrator:
             "lgbm_prob_down": prediction.prob_down,
             "gpt_sentiment": sentiment_score,
             "mtf_confluence": payload.get("mtf_confluence"),
+            "alert_mode": payload.get("alert_mode"),
+            "quality_gate_pass": payload.get("quality_gate_pass"),
+            "vol_ok": payload.get("vol_ok"),
+            "in_session": payload.get("in_session"),
+            "is_friday_late": payload.get("is_friday_late"),
             "executed": False,
         })
 
@@ -444,6 +474,11 @@ class Orchestrator:
                 "lgbm_prob_down": prediction.prob_down,
                 "gpt_sentiment": sentiment_score,
                 "mtf_confluence": payload.get("mtf_confluence"),
+                "alert_mode": payload.get("alert_mode"),
+                "quality_gate_pass": payload.get("quality_gate_pass"),
+                "vol_ok": payload.get("vol_ok"),
+                "in_session": payload.get("in_session"),
+                "is_friday_late": payload.get("is_friday_late"),
                 "executed": False,
                 "veto_reason": "flat_signal",
             })

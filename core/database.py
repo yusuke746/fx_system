@@ -66,10 +66,35 @@ def init_db(db_path: str) -> None:
     conn = get_connection(db_path)
     try:
         conn.executescript(_SCHEMA_SQL)
+        _ensure_schema_compat(conn)
         conn.commit()
         logger.info(f"Database initialized: {db_path}")
     finally:
         conn.close()
+
+
+def _ensure_schema_compat(conn: sqlite3.Connection) -> None:
+    """既存DBに不足している後方互換カラムを追加する。"""
+    _ensure_column(conn, "signals", "alert_mode", "TEXT")
+    _ensure_column(conn, "signals", "quality_gate_pass", "INTEGER")
+    _ensure_column(conn, "signals", "vol_ok", "INTEGER")
+    _ensure_column(conn, "signals", "in_session", "INTEGER")
+    _ensure_column(conn, "signals", "is_friday_late", "INTEGER")
+
+    _ensure_column(conn, "training_samples", "alert_mode", "TEXT")
+    _ensure_column(conn, "training_samples", "quality_gate_pass", "INTEGER")
+    _ensure_column(conn, "training_samples", "vol_ok", "INTEGER")
+    _ensure_column(conn, "training_samples", "in_session", "INTEGER")
+    _ensure_column(conn, "training_samples", "is_friday_late", "INTEGER")
+
+
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_type_sql: str) -> None:
+    cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    existing = {row[1] for row in cols}
+    if column_name in existing:
+        return
+    _execute_with_retry(conn, f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type_sql}")
+    logger.info(f"DB migration: added column {table_name}.{column_name}")
 
 
 _SCHEMA_SQL = """
@@ -104,6 +129,11 @@ CREATE TABLE IF NOT EXISTS signals (
     lgbm_prob_down  REAL,
     gpt_sentiment   REAL,
     mtf_confluence  INTEGER,
+    alert_mode      TEXT,
+    quality_gate_pass INTEGER,
+    vol_ok          INTEGER,
+    in_session      INTEGER,
+    is_friday_late  INTEGER,
     executed        BOOLEAN DEFAULT FALSE,
     veto_reason     TEXT,
     created_at      TIMESTAMP DEFAULT (datetime('now'))
@@ -178,6 +208,11 @@ CREATE TABLE IF NOT EXISTS training_samples (
     max_dd_24h               REAL DEFAULT 0,
     calendar_risk_score      INTEGER DEFAULT 0,
     sentiment_score          REAL DEFAULT 0,
+    alert_mode               TEXT,
+    quality_gate_pass        INTEGER,
+    vol_ok                   INTEGER,
+    in_session               INTEGER,
+    is_friday_late           INTEGER,
     label                    INTEGER,            -- 0=up, 1=flat, 2=down
     future_close_price       REAL,
     future_return_pips       REAL,
@@ -243,8 +278,10 @@ def insert_signal(conn: sqlite3.Connection, signal: dict) -> int:
         conn,
         """INSERT INTO signals
            (pair, signal_time, direction, lgbm_prob_up, lgbm_prob_flat,
-            lgbm_prob_down, gpt_sentiment, mtf_confluence, executed, veto_reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            lgbm_prob_down, gpt_sentiment, mtf_confluence,
+            alert_mode, quality_gate_pass, vol_ok, in_session, is_friday_late,
+            executed, veto_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             signal["pair"],
             signal["signal_time"].isoformat(),
@@ -254,6 +291,11 @@ def insert_signal(conn: sqlite3.Connection, signal: dict) -> int:
             signal.get("lgbm_prob_down"),
             signal.get("gpt_sentiment"),
             signal.get("mtf_confluence"),
+            signal.get("alert_mode"),
+            int(signal.get("quality_gate_pass")) if signal.get("quality_gate_pass") is not None else None,
+            int(signal.get("vol_ok")) if signal.get("vol_ok") is not None else None,
+            int(signal.get("in_session")) if signal.get("in_session") is not None else None,
+            int(signal.get("is_friday_late")) if signal.get("is_friday_late") is not None else None,
             signal.get("executed", False),
             signal.get("veto_reason"),
         ),
@@ -354,7 +396,8 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
            ob_4h_distance_pips, fvg_4h_fill_ratio, liq_sweep_strength,
            prior_candle_body_ratio, consecutive_same_dir, pivot_proximity,
               sweep_pending_bars,
-           open_positions_count, max_dd_24h, calendar_risk_score, sentiment_score
+              open_positions_count, max_dd_24h, calendar_risk_score, sentiment_score,
+              alert_mode, quality_gate_pass, vol_ok, in_session, is_friday_late
         ) VALUES (
            ?, ?, ?, ?, ?,
            ?, ?, ?,
@@ -367,7 +410,8 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
            ?, ?, ?,
            ?, ?, ?,
               ?,
-           ?, ?, ?, ?
+              ?, ?, ?, ?,
+              ?, ?, ?, ?, ?
         )""",
         (
             sample["pair"],
@@ -409,6 +453,11 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
             sample.get("max_dd_24h", 0.0),
             sample.get("calendar_risk_score", 0),
             sample.get("sentiment_score", 0.0),
+            sample.get("alert_mode"),
+            int(sample.get("quality_gate_pass")) if sample.get("quality_gate_pass") is not None else None,
+            int(sample.get("vol_ok")) if sample.get("vol_ok") is not None else None,
+            int(sample.get("in_session")) if sample.get("in_session") is not None else None,
+            int(sample.get("is_friday_late")) if sample.get("is_friday_late") is not None else None,
         ),
     )
     _commit_with_retry(conn)
