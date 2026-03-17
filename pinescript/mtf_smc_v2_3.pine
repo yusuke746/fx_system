@@ -5,6 +5,7 @@
 //
 // ■ v2.2 → v2.3 変更点
 //   [1] Sweep強度フィルター: i_sweep_min_str 以上でのみ mtf_confluence に加算
+// Python側で最終制御するため、Pineでは監視表示用途のみ
 //   [2] 1H Sweep後の15M MSB確認ステートマシン追加
 //       → エントリーは「Sweep検出 → 15M構造ブレイク確認後」に絞り込み
 //       → タイムアウト(i_sweep_timeout バー)でリセット
@@ -351,12 +352,14 @@ if sweep_bull_started and sweep_strength >= i_sweep_min_str
     sweep_bear_pending := false
     sweep_pending_bars := 0
     msb_ref_high_15m  := last_swing_high_15m  // Sweep時点の15M高値を参照点に設定
+    msb_ref_low_15m   := na
 
 if sweep_bear_started and sweep_strength >= i_sweep_min_str
     sweep_bear_pending := true
     sweep_bull_pending := false
     sweep_pending_bars := 0
     msb_ref_low_15m   := last_swing_low_15m   // Sweep時点の15M安値を参照点に設定
+    msb_ref_high_15m  := na
 
 // ペンディングバーをカウント
 if sweep_bull_pending or sweep_bear_pending
