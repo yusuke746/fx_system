@@ -209,20 +209,21 @@ class MT5Broker:
         pair: str,
         direction: str,
         volume: float,
-        sl_price: float,
-        tp_price: float,
-    ) -> tuple[bool, int | None]:
+        sl_pips: float,
+        tp_pips: float,
+    ) -> tuple[bool, int | None, float, float]:
         """
         非同期で新規ポジションを開く（ThreadPoolExecutor経由でシリアル実行）。
+        SL/TPは発注時の実tick価格から計算する。
 
         Returns:
-            (success, ticket or None)
+            (success, ticket or None, actual_sl_price, actual_tp_price)
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             _executor,
             self._open_position_sync,
-            pair, direction, volume, sl_price, tp_price,
+            pair, direction, volume, sl_pips, tp_pips,
         )
 
     def _open_position_sync(
@@ -230,20 +231,37 @@ class MT5Broker:
         pair: str,
         direction: str,
         volume: float,
-        sl_price: float,
-        tp_price: float,
-    ) -> tuple[bool, int | None]:
-        """新規ポジションを開く（同期版）。"""
+        sl_pips: float,
+        tp_pips: float,
+    ) -> tuple[bool, int | None, float, float]:
+        """新規ポジションを開く（同期版）。SL/TPは発注時の実tick価格から計算する。"""
         if not MT5_AVAILABLE:
-            return False, None
+            return False, None, 0.0, 0.0
 
         order_type = mt5.ORDER_TYPE_BUY if direction == "long" else mt5.ORDER_TYPE_SELL
-        price_func = mt5.symbol_info_tick(pair)
-        if price_func is None:
+        tick = mt5.symbol_info_tick(pair)
+        if tick is None:
             logger.error(f"Cannot get tick for {pair}")
-            return False, None
+            return False, None, 0.0, 0.0
 
-        price = price_func.ask if direction == "long" else price_func.bid
+        price = tick.ask if direction == "long" else tick.bid
+
+        # JPY建てペアは 0.01=1pip、その他は 0.0001=1pip
+        pip_unit = 0.01 if pair in ("USDJPY", "GBPJPY") else 0.0001
+
+        # ブローカーの最小ストップ距離（stops_level はポイント単位）を強制する
+        info = mt5.symbol_info(pair)
+        if info is not None and info.stops_level > 0:
+            min_stop_pips = info.stops_level * info.point / pip_unit
+            sl_pips = max(sl_pips, min_stop_pips + 1.0)
+            tp_pips = max(tp_pips, min_stop_pips + 1.0)
+
+        if direction == "long":
+            sl_price = round(price - sl_pips * pip_unit, 5)
+            tp_price = round(price + tp_pips * pip_unit, 5)
+        else:
+            sl_price = round(price + sl_pips * pip_unit, 5)
+            tp_price = round(price - tp_pips * pip_unit, 5)
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -263,20 +281,20 @@ class MT5Broker:
         result = mt5.order_send(request)
         if result is None:
             logger.error(f"Order send failed for {pair}: result is None")
-            return False, None
+            return False, None, 0.0, 0.0
 
         if result.retcode == TRADE_RETCODE_DONE:
             logger.info(
                 f"Position opened: {pair} {direction} vol={volume} "
                 f"price={price} SL={sl_price} TP={tp_price} ticket={result.order}"
             )
-            return True, result.order
+            return True, result.order, sl_price, tp_price
 
         logger.error(
             f"Order rejected for {pair}: retcode={result.retcode} "
             f"comment={result.comment}"
         )
-        return False, None
+        return False, None, 0.0, 0.0
 
     async def close_position_async(self, ticket: int) -> bool:
         """非同期でポジションを決済する。"""

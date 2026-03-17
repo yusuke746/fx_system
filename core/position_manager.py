@@ -138,14 +138,17 @@ class PositionManager:
         ticket: int,
         direction: str,
         volume: float,
-        sl_price: float,
-        tp_price: float,
+        sl_pips: float,
+        tp_pips: float,
         signal_price: float,
         reason: str = "doten",
-    ) -> tuple[bool, int | None]:
+    ) -> tuple[bool, int | None, float, float]:
         """
         ドテン高速連続発注。
         決済→確認→新規の順序保証（asyncio.gather は使わない）。
+
+        Returns:
+            (success, new_ticket or None, actual_sl_price, actual_tp_price)
         """
         pos = self._positions.get(ticket)
 
@@ -156,27 +159,27 @@ class PositionManager:
                 f"[DOTEN FAIL] {pair} 決済失敗 ticket={ticket}",
                 AlertLevel.CRITICAL,
             )
-            return False, None
+            return False, None, 0.0, 0.0
 
         if pos is not None:
             self._finalize_closed_position(pos, signal_price, reason)
         else:
             self.unregister_position(ticket)
 
-        # 新規建て
-        open_ok, new_ticket = await self._broker.open_position_async(
-            pair, direction, volume, sl_price, tp_price,
+        # 新規建て（SL/TPは実tick価格から計算）
+        open_ok, new_ticket, actual_sl, actual_tp = await self._broker.open_position_async(
+            pair, direction, volume, sl_pips, tp_pips,
         )
         if not open_ok:
             await self._notifier.send(
                 f"[DOTEN FAIL] {pair} 新規建て失敗（決済済み・ノーポジ）",
                 AlertLevel.CRITICAL,
             )
-            return False, None
+            return False, None, 0.0, 0.0
 
         self._last_doten_time[pair] = now_utc()
         logger.info(f"Doten executed: {pair} → {direction} ticket={new_ticket}")
-        return True, new_ticket
+        return True, new_ticket, actual_sl, actual_tp
 
     # ── 毎分ポジション監視 ────────────────────
     async def monitor_positions(self) -> None:

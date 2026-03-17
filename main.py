@@ -518,9 +518,9 @@ class Orchestrator:
                 sl_price, tp_price = self._calc_sl_tp_price(
                     pair, prediction.direction, close_price, sl_pips, tp_pips,
                 )
-                ok, new_ticket = await self._position_manager.execute_doten(
+                ok, new_ticket, sl_price, tp_price = await self._position_manager.execute_doten(
                     pair, pos.ticket, prediction.direction,
-                    lot, sl_price, tp_price, close_price,
+                    lot, sl_pips, tp_pips, close_price,
                 )
                 if ok and new_ticket:
                     trade_id = insert_trade(self._db_conn, {
@@ -593,8 +593,8 @@ class Orchestrator:
             pair, prediction.direction, close_price, sl_pips, tp_pips,
         )
 
-        ok, ticket = await self._broker.open_position_async(
-            pair, prediction.direction, lot, sl_price, tp_price,
+        ok, ticket, sl_price, tp_price = await self._broker.open_position_async(
+            pair, prediction.direction, lot, sl_pips, tp_pips,
         )
 
         if ok and ticket:
