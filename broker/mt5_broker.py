@@ -249,10 +249,17 @@ class MT5Broker:
         # JPY建てペアは 0.01=1pip、その他は 0.0001=1pip
         pip_unit = 0.01 if pair in ("USDJPY", "GBPJPY") else 0.0001
 
-        # ブローカーの最小ストップ距離（stops_level はポイント単位）を強制する
+        # ブローカーの最小ストップ距離（ポイント単位）を強制する
+        # 環境によって stops_level / trade_stops_level のどちらかになるため両対応する。
         info = mt5.symbol_info(pair)
-        if info is not None and info.stops_level > 0:
-            min_stop_pips = info.stops_level * info.point / pip_unit
+        stops_level = 0
+        point = 0.0
+        if info is not None:
+            stops_level = int(getattr(info, "stops_level", getattr(info, "trade_stops_level", 0)) or 0)
+            point = float(getattr(info, "point", 0.0) or 0.0)
+
+        if stops_level > 0 and point > 0:
+            min_stop_pips = stops_level * point / pip_unit
             sl_pips = max(sl_pips, min_stop_pips + 1.0)
             tp_pips = max(tp_pips, min_stop_pips + 1.0)
 

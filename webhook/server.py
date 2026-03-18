@@ -12,6 +12,7 @@ FastAPI Webhook サーバー
 """
 
 import hmac
+import ipaddress
 
 from cachetools import TTLCache
 from fastapi import FastAPI, Request, HTTPException
@@ -54,6 +55,9 @@ async def receive_webhook(request: Request):
         raise HTTPException(status_code=429, detail="Too many invalid auth attempts")
 
     settings = get_settings()
+    if not _is_ip_allowed(client_ip, settings):
+        logger.warning(f"Webhook rejected by IP allowlist: {client_ip}")
+        raise HTTPException(status_code=403, detail="IP not allowed")
 
     try:
         payload = await request.json()
@@ -113,14 +117,40 @@ async def favicon():
 
 def _get_client_ip(request: Request) -> str:
     """プロキシ環境を考慮してクライアントIPを取得する。"""
+    settings = get_settings()
+    direct_ip = request.client.host if request.client and request.client.host else "unknown"
+
     xff = request.headers.get("x-forwarded-for", "")
-    if xff:
+    if xff and _is_trusted_proxy(direct_ip, settings):
         first_ip = xff.split(",")[0].strip()
         if first_ip:
             return first_ip
-    if request.client and request.client.host:
-        return request.client.host
+    if direct_ip:
+        return direct_ip
     return "unknown"
+
+
+def _is_ip_allowed(client_ip: str, settings) -> bool:
+    """allowlist が設定されている場合のみクライアントIPを制限する。"""
+    allowed_networks = settings.webhook_allowed_networks
+    if not allowed_networks:
+        return True
+    try:
+        ip_obj = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    return any(ip_obj in network for network in allowed_networks)
+
+
+def _is_trusted_proxy(client_ip: str, settings) -> bool:
+    trusted_networks = settings.webhook_trusted_proxy_networks
+    if not trusted_networks:
+        return False
+    try:
+        ip_obj = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    return any(ip_obj in network for network in trusted_networks)
 
 
 def _record_auth_failure(client_ip: str) -> None:

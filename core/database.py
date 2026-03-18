@@ -362,6 +362,15 @@ def get_recent_trades(conn: sqlite3.Connection, pair: str | None = None,
     return [dict(r) for r in rows]
 
 
+def get_open_trade_by_ticket(conn: sqlite3.Connection, mt5_ticket: int) -> dict | None:
+    """MT5 ticket に対応する未決済 trade を取得する。"""
+    row = conn.execute(
+        "SELECT * FROM trades WHERE mt5_ticket=? AND close_time IS NULL ORDER BY open_time DESC LIMIT 1",
+        (mt5_ticket,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def get_daily_pnl(conn: sqlite3.Connection, day_start_utc=None) -> float:
     """当日（ブローカー日付の00:00起点）のP&L合計（円）を返す。"""
     if day_start_utc is None:

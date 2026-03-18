@@ -57,6 +57,7 @@ i_sweep_timeout  = input.int(16, "Sweep待機タイムアウト 15Mバー数 [NE
 i_fvg_mit_ratio  = input.float(0.5, "FVG使用済み閾値 充填率 [NEW]",
      minval=0.1, maxval=1.0, step=0.1,
      tooltip="FVGゾーンにこの比率以上価格が入ったら使用済みとしてリセット。0.5=50%。")
+i_export_csv     = input.bool(false, "CSVエクスポートモード [NEW]", tooltip="ONでシグナル確定足のみ35特徴量をデータウィンドウへ出力。TradingViewのExport chart data用。")
 
 
 // =====================================================
@@ -420,33 +421,38 @@ is_friday_late = dayofweek == dayofweek.friday and utc_hour >= 20
 // セクション6: エントリー条件
 // =====================================================
 
-vol_ok         = atr_14 > atr_avg_20 * 0.8 and not bb_squeeze
+// 15M単体の Liquidity Sweep（上位足を待たず局所的な反発を拾う）
+sweep_bull_15m_raw = not na(last_swing_low_15m) and low < last_swing_low_15m and close > last_swing_low_15m
+sweep_bear_15m_raw = not na(last_swing_high_15m) and high > last_swing_high_15m and close < last_swing_high_15m
+
+// 連続発火を防ぐため、1度Sweepしたら次の新しいSwingが形成されるまで無視
+var float swept_low_15m = na
+var float swept_high_15m = na
+sweep_bull_15m = sweep_bull_15m_raw and last_swing_low_15m != swept_low_15m
+sweep_bear_15m = sweep_bear_15m_raw and last_swing_high_15m != swept_high_15m
+if sweep_bull_15m
+    swept_low_15m := last_swing_low_15m
+if sweep_bear_15m
+    swept_high_15m := last_swing_high_15m
+
+// 4Hの壁（OB/FVG）に新しく突入した瞬間（ファーストタッチ）
+ob_touch = ob_4h_zone_active and not ob_4h_zone_active[1]
+fvg_touch = fvg_4h_zone_active and not fvg_4h_zone_active[1]
+
 momentum_long  = macd_cross_up   or rsi_oversold
 momentum_short = macd_cross_down or rsi_overbought
 
-// SMC的に意味のある動きが「何か1つ」あればPythonへ送る
-// 判断はLightGBMに委譲 → trend方向・momentum条件は特徴量として送る
+// トリガー条件: SMC的に意味のあるイベント（POI）が起きたか？
+smc_bull_trigger = msb_15m_bull or choch_1h_bull or bos_1h_bull or sweep_bull_15m or ob_touch or fvg_touch
+smc_bear_trigger = msb_15m_bear or choch_1h_bear or bos_1h_bear or sweep_bear_15m or ob_touch or fvg_touch
 
-// ロング候補: 15M MSB or 1H ChoCH or 1H BOS のいずれか
-smc_bull_trigger = msb_15m_bull or choch_1h_bull or bos_1h_bull
+// vol_ok と mtf_confluence の足切りを削除
+long_condition = smc_bull_trigger and in_session and not is_friday_late
+short_condition = smc_bear_trigger and in_session and not is_friday_late
 
-// ショート候補: 15M MSB or 1H ChoCH or 1H BOS のいずれか
-smc_bear_trigger = msb_15m_bear or choch_1h_bear or bos_1h_bear
-
-strict_long_raw  = smc_bull_trigger and mtf_confluence >= i_confluence_min and vol_ok
-strict_short_raw = smc_bear_trigger and mtf_confluence >= i_confluence_min and vol_ok
-
-ml_long_raw      = smc_bull_trigger
-ml_short_raw     = smc_bear_trigger
-
-long_raw  = i_alert_mode == "strict" ? strict_long_raw : ml_long_raw
-short_raw = i_alert_mode == "strict" ? strict_short_raw : ml_short_raw
-
-// アラート連打防止: 条件成立の立ち上がりのみ発火
-long_condition  = long_raw and not long_raw[1]
-short_condition = short_raw and not short_raw[1]
-
-quality_gate_pass = mtf_confluence >= i_confluence_min and vol_ok
+// JSON payload の互換性維持用。Pine側での足切りは行わない。
+vol_ok = true
+quality_gate_pass = true
 
 
 // =====================================================
@@ -475,12 +481,12 @@ f_build_json(dir, msb_conf, choch_flag) =>
     _p9 = ',"vol_ok":' + str.tostring(vol_ok) + ',"quality_gate_pass":' + str.tostring(quality_gate_pass) + ',"in_session":' + str.tostring(in_session) + ',"is_friday_late":' + str.tostring(is_friday_late) + ',"alert_mode":"' + i_alert_mode + '"'
     _p1 + _p2 + _p3 + _p4 + _p5 + _p6 + _p7 + _p8 + _p9 + '}'
 
-// アラート発火
-if long_condition
-    alert(f_build_json("long", msb_15m_bull, choch_1h_bull), alert.freq_once_per_bar)
+// アラート発火（必ずローソク足確定時のみに制限）
+if long_condition and barstate.isconfirmed
+    alert(f_build_json("long", msb_15m_bull, choch_1h_bull), alert.freq_once_per_bar_close)
 
-if short_condition
-    alert(f_build_json("short", msb_15m_bear, choch_1h_bear), alert.freq_once_per_bar)
+if short_condition and barstate.isconfirmed
+    alert(f_build_json("short", msb_15m_bear, choch_1h_bear), alert.freq_once_per_bar_close)
 
 
 // =====================================================
@@ -582,3 +588,62 @@ if barstate.islast
 
 // セッション背景
 bgcolor(in_session ? color.new(color.blue, 95) : na, title="Active Session")
+
+
+// =====================================================
+// セクション9: CSVエクスポート用プロット（初期学習データ作成用）
+// =====================================================
+
+csv_is_signal = i_export_csv and ((long_condition and barstate.isconfirmed) or (short_condition and barstate.isconfirmed))
+csv_direction = long_condition ? 1 : short_condition ? 2 : na
+
+// TradingView単独では再現できない4特徴量は、初期モデルのブートストラップ用に0固定で出力する。
+csv_open_positions_count = 0
+csv_max_dd_24h = 0.0
+csv_calendar_risk_score = 0
+csv_sentiment_score = 0.0
+csv_msb_15m_confirmed = (long_condition and msb_15m_bull) or (short_condition and msb_15m_bear) ? 1 : 0
+
+plot(csv_is_signal ? csv_direction : na, title="CSV_direction", display=display.data_window)
+plot(csv_is_signal ? close : na, title="CSV_close_price", display=display.data_window)
+
+plot(csv_is_signal ? (fvg_4h_zone_active ? 1 : 0) : na, title="CSV_fvg_4h_zone_active", display=display.data_window)
+plot(csv_is_signal ? (ob_4h_zone_active ? 1 : 0) : na, title="CSV_ob_4h_zone_active", display=display.data_window)
+plot(csv_is_signal ? (liq_sweep_1h ? 1 : 0) : na, title="CSV_liq_sweep_1h", display=display.data_window)
+plot(csv_is_signal ? (liq_sweep_qualified ? 1 : 0) : na, title="CSV_liq_sweep_qualified", display=display.data_window)
+plot(csv_is_signal ? (bos_1h ? 1 : 0) : na, title="CSV_bos_1h", display=display.data_window)
+plot(csv_is_signal ? (choch_1h ? 1 : 0) : na, title="CSV_choch_1h", display=display.data_window)
+plot(csv_is_signal ? csv_msb_15m_confirmed : na, title="CSV_msb_15m_confirmed", display=display.data_window)
+plot(csv_is_signal ? mtf_confluence : na, title="CSV_mtf_confluence", display=display.data_window)
+
+plot(csv_is_signal ? atr_14 : na, title="CSV_atr_14", display=display.data_window)
+plot(csv_is_signal ? atr_ratio : na, title="CSV_atr_ratio", display=display.data_window)
+plot(csv_is_signal ? bb_width : na, title="CSV_bb_width", display=display.data_window)
+plot(csv_is_signal ? close_vs_ema20_4h : na, title="CSV_close_vs_ema20_4h", display=display.data_window)
+plot(csv_is_signal ? close_vs_ema50_4h : na, title="CSV_close_vs_ema50_4h", display=display.data_window)
+plot(csv_is_signal ? high_low_range_15m : na, title="CSV_high_low_range_15m", display=display.data_window)
+
+plot(csv_is_signal ? (trend_bullish ? 1 : trend_bearish ? -1 : 0) : na, title="CSV_trend_direction", display=display.data_window)
+plot(csv_is_signal ? (momentum_long ? 1 : 0) : na, title="CSV_momentum_long", display=display.data_window)
+plot(csv_is_signal ? (momentum_short ? 1 : 0) : na, title="CSV_momentum_short", display=display.data_window)
+
+plot(csv_is_signal ? macd_hist : na, title="CSV_macd_histogram", display=display.data_window)
+plot(csv_is_signal ? (macd_cross_up ? 1 : macd_cross_down ? -1 : 0) : na, title="CSV_macd_signal_cross", display=display.data_window)
+plot(csv_is_signal ? rsi_14 : na, title="CSV_rsi_14", display=display.data_window)
+plot(csv_is_signal ? rsi_zone : na, title="CSV_rsi_zone", display=display.data_window)
+plot(csv_is_signal ? stoch_k : na, title="CSV_stoch_k", display=display.data_window)
+plot(csv_is_signal ? stoch_d : na, title="CSV_stoch_d", display=display.data_window)
+plot(csv_is_signal ? momentum_3bar : na, title="CSV_momentum_3bar", display=display.data_window)
+
+plot(csv_is_signal ? ob_4h_distance : na, title="CSV_ob_4h_distance_pips", display=display.data_window)
+plot(csv_is_signal ? fvg_4h_fill_ratio : na, title="CSV_fvg_4h_fill_ratio", display=display.data_window)
+plot(csv_is_signal ? sweep_strength : na, title="CSV_liq_sweep_strength", display=display.data_window)
+plot(csv_is_signal ? prior_candle_body_ratio : na, title="CSV_prior_candle_body_ratio", display=display.data_window)
+plot(csv_is_signal ? consecutive_same_dir : na, title="CSV_consecutive_same_dir", display=display.data_window)
+plot(csv_is_signal ? pivot_proximity : na, title="CSV_pivot_proximity", display=display.data_window)
+plot(csv_is_signal ? sweep_pending_bars : na, title="CSV_sweep_pending_bars", display=display.data_window)
+
+plot(csv_is_signal ? csv_open_positions_count : na, title="CSV_open_positions_count", display=display.data_window)
+plot(csv_is_signal ? csv_max_dd_24h : na, title="CSV_max_dd_24h", display=display.data_window)
+plot(csv_is_signal ? csv_calendar_risk_score : na, title="CSV_calendar_risk_score", display=display.data_window)
+plot(csv_is_signal ? csv_sentiment_score : na, title="CSV_sentiment_score", display=display.data_window)

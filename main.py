@@ -40,6 +40,7 @@ from core.database import (
     close_trade,
     get_daily_pnl,
     insert_training_sample,
+    get_open_trade_by_ticket,
 )
 from core.logger import setup_logger
 from core.notifier import DiscordNotifier, AlertLevel
@@ -155,6 +156,9 @@ class Orchestrator:
             if not ok:
                 logger.warning(f"Model not loaded for {pair} — predictions unavailable")
 
+        # MT5 側に残っている建玉をローカル管理へ復元
+        self._restore_managed_positions_from_broker()
+
         # スケジューラ設定
         self._setup_scheduler()
         self._scheduler.start()
@@ -173,7 +177,8 @@ class Orchestrator:
     async def stop(self) -> None:
         """システムを停止する。"""
         self._running = False
-        self._scheduler.shutdown(wait=False)
+        if getattr(self._scheduler, "running", False):
+            self._scheduler.shutdown(wait=False)
         self._broker.disconnect()
         self._db_conn.close()
         logger.info("System stopped")
@@ -229,6 +234,62 @@ class Orchestrator:
         )
 
         logger.info("Scheduler configured with all maintenance jobs")
+
+    def _restore_managed_positions_from_broker(self) -> None:
+        """再起動後に MT5 の保有建玉をローカル管理状態へ復元する。"""
+        config = get_trading_config()
+        risk = config.get("risk", {})
+        trailing_mult = float(risk.get("trailing_atr_multiplier", 0.8))
+        if trailing_mult <= 0:
+            trailing_mult = 0.8
+
+        restored = 0
+        for broker_pos in self._broker.get_positions():
+            ticket = int(broker_pos["ticket"])
+            if ticket in self._position_manager.positions:
+                continue
+
+            trade_row = get_open_trade_by_ticket(self._db_conn, ticket)
+            if trade_row is None:
+                trade_id = insert_trade(self._db_conn, {
+                    "pair": broker_pos["pair"],
+                    "direction": broker_pos["direction"],
+                    "open_time": broker_pos["open_time_utc"],
+                    "open_price": broker_pos["open_price"],
+                    "volume": broker_pos["volume"],
+                    "sl_price": broker_pos.get("sl_price"),
+                    "tp_price": broker_pos.get("tp_price"),
+                    "mt5_ticket": ticket,
+                })
+                trade_row = {
+                    "id": trade_id,
+                    "open_time": broker_pos["open_time_utc"].isoformat(),
+                }
+
+            open_price = float(broker_pos["open_price"])
+            sl_price = float(broker_pos.get("sl_price") or 0.0)
+            tp_price = float(broker_pos.get("tp_price") or 0.0)
+            inferred_atr = abs(open_price - sl_price) / trailing_mult if sl_price > 0 else 0.0
+
+            managed = ManagedPosition(
+                trade_id=int(trade_row["id"]),
+                ticket=ticket,
+                pair=broker_pos["pair"],
+                direction=broker_pos["direction"],
+                volume=float(broker_pos["volume"]),
+                open_price=open_price,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                target_tp_price=tp_price,
+                target_tp_pips=0.0,
+                open_time_utc=broker_pos["open_time_utc"],
+                atr_at_entry=max(inferred_atr, 0.0),
+            )
+            self._position_manager.register_position(managed)
+            restored += 1
+
+        if restored > 0:
+            logger.warning(f"Recovered {restored} broker positions into local manager state")
 
     # ── メインシグナル処理ループ ──────────────────
     async def _signal_processing_loop(self) -> None:
@@ -854,6 +915,8 @@ async def main() -> None:
         )
     except asyncio.CancelledError:
         logger.info("Shutdown requested (task cancelled)")
+    except RuntimeError as e:
+        logger.error(f"System startup/runtime error: {e}")
     finally:
         await orchestrator.stop()
 
