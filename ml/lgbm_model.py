@@ -1,21 +1,22 @@
 """
 LightGBM 特徴量エンジニアリング・推論モジュール
 
-■ 35特徴量（MTF SMC v2.3 センサー拡張版）
+■ 36特徴量（MTF SMC v2.3 センサー拡張版）
 
     SMCフラグ(8): fvg_4h_zone_active, ob_4h_zone_active, liq_sweep_1h,
                                  liq_sweep_qualified, bos_1h, choch_1h,
                                  msb_15m_confirmed, mtf_confluence
-    価格・ボラティリティ系(6): atr_14, atr_ratio, bb_width,
+    価格・ボラティリティ系(5): atr_ratio, bb_width,
                                  close_vs_ema20_4h, close_vs_ema50_4h, high_low_range_15m
     トレンド・モメンタム補助(3): trend_direction, momentum_long, momentum_short
     モメンタム系(7): macd_histogram, macd_signal_cross, rsi_14, rsi_zone,
                                  stoch_k, stoch_d, momentum_3bar
-  構造・パターン系(7): ob_4h_distance_pips, fvg_4h_fill_ratio,
+  構造・パターン系(6): ob_4h_distance_pips, fvg_4h_fill_ratio,
                  liq_sweep_strength, prior_candle_body_ratio,
-                 consecutive_same_dir, pivot_proximity, sweep_pending_bars
+                 consecutive_same_dir, sweep_pending_bars
   リスク・ポジション系(4): open_positions_count, max_dd_24h,
                  calendar_risk_score, sentiment_score
+  新規追加(3): session_type, day_of_week, tp_distance_pips
 
 ■ 時刻基準
     - 全特徴量は保存基準（UTC）の signal_time に紐づけて管理
@@ -42,8 +43,7 @@ FEATURE_NAMES = [
     "choch_1h",                  # [NEW v2.3]
     "msb_15m_confirmed",         # [NEW v2.3]
     "mtf_confluence",
-    # 価格・ボラティリティ系 (6)
-    "atr_14",
+    # 価格・ボラティリティ系 (5) ← atr_14を削除
     "atr_ratio",
     "bb_width",
     "close_vs_ema20_4h",
@@ -61,22 +61,25 @@ FEATURE_NAMES = [
     "stoch_k",
     "stoch_d",
     "momentum_3bar",
-    # 構造・パターン系 (7)
+    # 構造・パターン系 (6) ← pivot_proximityを削除
     "ob_4h_distance_pips",
     "fvg_4h_fill_ratio",
     "liq_sweep_strength",
     "prior_candle_body_ratio",
     "consecutive_same_dir",
-    "pivot_proximity",
-    "sweep_pending_bars",        # [NEW v2.3]
+    "sweep_pending_bars",
     # リスク・ポジション系 (4)
     "open_positions_count",
     "max_dd_24h",
     "calendar_risk_score",
     "sentiment_score",
+    # 新規追加 (3)
+    "session_type",
+    "day_of_week",
+    "tp_distance_pips",
 ]
 
-assert len(FEATURE_NAMES) == 35, f"Expected 35 features, got {len(FEATURE_NAMES)}"
+assert len(FEATURE_NAMES) == 36, f"Expected 36 features, got {len(FEATURE_NAMES)}"
 
 # LightGBM 学習パラメータ（設計書 確定値）
 LGBM_PARAMS = {
@@ -121,13 +124,13 @@ class PredictionResult:
         if signal_direction == "long":
             # longシグナルを通す条件:
             # ① up確率が35%以上、または
-            # ② down確率が70%未満（モデルが強く否定していない）
-            return self.prob_up >= 0.35 or self.prob_down < 0.70
+            # ② down確率が60%未満（モデルが強く否定していない）
+            return self.prob_up >= 0.35 or self.prob_down < 0.60
         else:
             # shortシグナルを通す条件:
             # ① down確率が35%以上、または
-            # ② up確率が70%未満
-            return self.prob_down >= 0.35 or self.prob_up < 0.70
+            # ② up確率が60%未満
+            return self.prob_down >= 0.35 or self.prob_up < 0.60
 
     @property
     def is_reverse_signal(self) -> bool:
@@ -141,9 +144,12 @@ def build_features(
     position_data: dict,
     sentiment_score: float = 0.0,
     calendar_risk_score: int = 0,
+    session_type: int = 0,
+    day_of_week: int = 0,
+    tp_distance_pips: float = 0.0,
 ) -> np.ndarray:
     """
-    35特徴量ベクトルを構築する。
+    36特徴量ベクトルを構築する。
 
     Args:
         smc_data: TradingView Webhook から受け取った SMC データ
@@ -151,9 +157,12 @@ def build_features(
         position_data: 現在のポジション情報
         sentiment_score: GPT-5.2 出力のセンチメントスコア
         calendar_risk_score: 経済指標リスクスコア (0/1/2)
+        session_type: セッション種別 (0=other, 1=london, 2=ny, 3=overlap)
+        day_of_week: 曜日 (0=月, ..., 6=日)
+        tp_distance_pips: TPまでの距離 (pips)
 
     Returns:
-        shape=(1, 35) の numpy 配列
+        shape=(1, 36) の numpy 配列
     """
     features = [
         # SMC フラグ (8)
@@ -165,8 +174,7 @@ def build_features(
         int(smc_data.get("choch_1h", False)),                  # [NEW v2.3]
         int(smc_data.get("msb_15m_confirmed", False)),         # [NEW v2.3]
         smc_data.get("mtf_confluence", 0),
-        # 価格・ボラティリティ系
-        market_data.get("atr_14", 0.0),
+        # 価格・ボラティリティ系 (5) ← atr_14を削除
         market_data.get("atr_ratio", 1.0),
         market_data.get("bb_width", 0.0),
         market_data.get("close_vs_ema20_4h", 0.0),
@@ -184,19 +192,22 @@ def build_features(
         market_data.get("stoch_k", 50.0),
         market_data.get("stoch_d", 50.0),
         market_data.get("momentum_3bar", 0.0),
-        # 構造・パターン系 (7)
+        # 構造・パターン系 (6) ← pivot_proximityを削除
         market_data.get("ob_4h_distance_pips", 0.0),
         market_data.get("fvg_4h_fill_ratio", 0.0),
         market_data.get("liq_sweep_strength", 0.0),
         market_data.get("prior_candle_body_ratio", 0.5),
         market_data.get("consecutive_same_dir", 0),
-        market_data.get("pivot_proximity", 0.0),
         smc_data.get("sweep_pending_bars", 0),              # [NEW v2.3]
         # リスク・ポジション系
         position_data.get("open_positions_count", 0),
         position_data.get("max_dd_24h", 0.0),
         calendar_risk_score,
         sentiment_score,
+        # 新規追加 (3)
+        session_type,
+        day_of_week,
+        tp_distance_pips,
     ]
 
     return np.array(features, dtype=np.float64).reshape(1, -1)

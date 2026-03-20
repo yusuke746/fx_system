@@ -35,6 +35,8 @@ def build_payload(pair: str, direction: str, token: str) -> dict:
         "close_vs_ema20_4h": -0.12,
         "close_vs_ema50_4h": 0.03,
         "high_low_range_15m": 0.09,
+        "tp_swing_pips": 28.5,
+        "tp_fvg_pips": 35.0,
         "ob_4h_distance_pips": 3.2,
         "fvg_4h_fill_ratio": 0.32,
         "liq_sweep_strength": 0.47,

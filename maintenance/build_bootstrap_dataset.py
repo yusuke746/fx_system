@@ -34,7 +34,6 @@ FEATURE_COLS = [
     "CSV_choch_1h",
     "CSV_msb_15m_confirmed",
     "CSV_mtf_confluence",
-    "CSV_atr_14",
     "CSV_atr_ratio",
     "CSV_bb_width",
     "CSV_close_vs_ema20_4h",
@@ -55,7 +54,6 @@ FEATURE_COLS = [
     "CSV_liq_sweep_strength",
     "CSV_prior_candle_body_ratio",
     "CSV_consecutive_same_dir",
-    "CSV_pivot_proximity",
     "CSV_sweep_pending_bars",
     "CSV_open_positions_count",
     "CSV_max_dd_24h",
@@ -72,7 +70,6 @@ RENAME_TO_MODEL = {
     "CSV_choch_1h": "choch_1h",
     "CSV_msb_15m_confirmed": "msb_15m_confirmed",
     "CSV_mtf_confluence": "mtf_confluence",
-    "CSV_atr_14": "atr_14",
     "CSV_atr_ratio": "atr_ratio",
     "CSV_bb_width": "bb_width",
     "CSV_close_vs_ema20_4h": "close_vs_ema20_4h",
@@ -93,7 +90,6 @@ RENAME_TO_MODEL = {
     "CSV_liq_sweep_strength": "liq_sweep_strength",
     "CSV_prior_candle_body_ratio": "prior_candle_body_ratio",
     "CSV_consecutive_same_dir": "consecutive_same_dir",
-    "CSV_pivot_proximity": "pivot_proximity",
     "CSV_sweep_pending_bars": "sweep_pending_bars",
     "CSV_open_positions_count": "open_positions_count",
     "CSV_max_dd_24h": "max_dd_24h",
@@ -214,9 +210,9 @@ def build_dataset(input_path: Path, output_path: Path, pair: str, horizon_bars: 
     pu = _pip_unit(pair)
     signal_df["future_return_pips"] = (signal_df["future_close_price"] - signal_df["CSV_close_price"]) / pu
 
-    def _label_for_row(i: int, row: pd.Series) -> int:
+    def _label_for_row(i: int, row: pd.Series) -> tuple[int, float]:
         sl_pips, tp_pips = _calc_sl_tp_pips(float(row["CSV_atr_14"]), pair)
-        return _simulate_label(
+        label = _simulate_label(
             row_idx=i,
             df=df,
             direction="long" if row["CSV_direction"] == 1.0 else "short",
@@ -226,13 +222,18 @@ def build_dataset(input_path: Path, output_path: Path, pair: str, horizon_bars: 
             pair=pair,
             horizon_bars=horizon_bars,
         )
+        return label, tp_pips
 
-    signal_df["label"] = [_label_for_row(i, row) for i, row in signal_df.iterrows()]
+    results = [_label_for_row(i, row) for i, row in signal_df.iterrows()]
+    signal_df["label"] = [r[0] for r in results]
+    signal_df["tp_distance_pips"] = [r[1] for r in results]
 
     signal_df["pair"] = pair
     signal_df["direction"] = signal_df["CSV_direction"].map({1.0: "long", 2.0: "short"})
+    signal_df["session_type"] = 0    # CSVには時刻なし → 0固定
+    signal_df["day_of_week"] = 0     # 同上 → 0固定
 
-    model_df = signal_df[["pair", "signal_time", "direction", "CSV_close_price", *FEATURE_COLS, "future_close_price", "future_return_pips", "label"]].copy()
+    model_df = signal_df[["pair", "signal_time", "direction", "CSV_close_price", *FEATURE_COLS, "future_close_price", "future_return_pips", "tp_distance_pips", "session_type", "day_of_week", "label"]].copy()
     model_df = model_df.rename(columns=RENAME_TO_MODEL | {"CSV_close_price": "close_price"})
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

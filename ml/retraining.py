@@ -140,7 +140,6 @@ def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
             float(row.get("choch_1h", 0)),
             float(row.get("msb_15m_confirmed", 0)),
             float(row.get("mtf_confluence", 0)),
-            float(row.get("atr", 0.0)),
             float(row.get("atr_ratio", 1.0)),
             float(row.get("bb_width", 0.0)),
             float(row.get("close_vs_ema20_4h", 0.0)),
@@ -161,12 +160,14 @@ def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
             float(row.get("liq_sweep_strength", 0.0)),
             float(row.get("prior_candle_body_ratio", 0.5)),
             float(row.get("consecutive_same_dir", 0)),
-            float(row.get("pivot_proximity", 0.0)),
             float(row.get("sweep_pending_bars", 0)),
             float(row.get("open_positions_count", 0)),
             float(row.get("max_dd_24h", 0.0)),
             float(row.get("calendar_risk_score", 0)),
             float(row.get("sentiment_score", 0.0)),
+            float(row.get("session_type", 0)),
+            float(row.get("day_of_week", 0)),
+            float(row.get("tp_distance_pips", 0.0)),
         ])
         y.append(int(row["label"]))
 

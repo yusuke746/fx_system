@@ -86,6 +86,8 @@ def _ensure_schema_compat(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "training_samples", "vol_ok", "INTEGER")
     _ensure_column(conn, "training_samples", "in_session", "INTEGER")
     _ensure_column(conn, "training_samples", "is_friday_late", "INTEGER")
+    _ensure_column(conn, "training_samples", "session_type", "INTEGER")
+    _ensure_column(conn, "training_samples", "tp_distance_pips", "REAL")
 
 
 def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_type_sql: str) -> None:
@@ -213,6 +215,8 @@ CREATE TABLE IF NOT EXISTS training_samples (
     vol_ok                   INTEGER,
     in_session               INTEGER,
     is_friday_late           INTEGER,
+    session_type             INTEGER DEFAULT 0,
+    tp_distance_pips         REAL DEFAULT 0.0,
     label                    INTEGER,            -- 0=up, 1=flat, 2=down
     future_close_price       REAL,
     future_return_pips       REAL,
@@ -390,7 +394,7 @@ def check_integrity(conn: sqlite3.Connection) -> bool:
 
 
 def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
-    """学習用サンプル（特徴量35個）を保存する。"""
+    """学習用サンプル（特徴量36個）を保存する。"""
     cur = _execute_with_retry(
         conn,
         """INSERT INTO training_samples (
@@ -403,10 +407,11 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
            macd_histogram, macd_signal_cross, rsi_14, rsi_zone,
            stoch_k, stoch_d, momentum_3bar,
            ob_4h_distance_pips, fvg_4h_fill_ratio, liq_sweep_strength,
-           prior_candle_body_ratio, consecutive_same_dir, pivot_proximity,
+           prior_candle_body_ratio, consecutive_same_dir,
               sweep_pending_bars,
               open_positions_count, max_dd_24h, calendar_risk_score, sentiment_score,
-              alert_mode, quality_gate_pass, vol_ok, in_session, is_friday_late
+              alert_mode, quality_gate_pass, vol_ok, in_session, is_friday_late,
+              session_type, tp_distance_pips
         ) VALUES (
            ?, ?, ?, ?, ?,
            ?, ?, ?,
@@ -417,10 +422,11 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
            ?, ?, ?, ?,
            ?, ?, ?,
            ?, ?, ?,
-           ?, ?, ?,
+           ?, ?,
               ?,
               ?, ?, ?, ?,
-              ?, ?, ?, ?, ?
+              ?, ?, ?, ?, ?,
+              ?, ?
         )""",
         (
             sample["pair"],
@@ -456,7 +462,6 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
             sample.get("liq_sweep_strength", 0.0),
             sample.get("prior_candle_body_ratio", 0.5),
             sample.get("consecutive_same_dir", 0),
-            sample.get("pivot_proximity", 0.0),
             sample.get("sweep_pending_bars", 0),
             sample.get("open_positions_count", 0),
             sample.get("max_dd_24h", 0.0),
@@ -467,6 +472,8 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
             int(sample.get("vol_ok")) if sample.get("vol_ok") is not None else None,
             int(sample.get("in_session")) if sample.get("in_session") is not None else None,
             int(sample.get("is_friday_late")) if sample.get("is_friday_late") is not None else None,
+            sample.get("session_type", 0),
+            sample.get("tp_distance_pips", 0.0),
         ),
     )
     _commit_with_retry(conn)
