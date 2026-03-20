@@ -61,6 +61,8 @@ class ManagedPosition:
     trailing_high: float = 0.0  # long の場合の最高値
     trailing_low: float = float("inf")  # short の場合の最安値
     last_trailing_update_utc: datetime | None = None
+    close_pending_since: datetime | None = None
+    # MT5側で決済済みだが履歴取得に失敗した場合のタイムスタンプ
 
 
 class PositionManager:
@@ -309,25 +311,44 @@ class PositionManager:
 
         for ticket, pos in list(self._positions.items()):
             if ticket in open_tickets:
+                # まだ開いている → close_pending_since をリセット
+                pos.close_pending_since = None
                 continue
 
-            closed_info = self._broker.get_recent_closed_position_info(ticket)
+            # MT5側で決済済み
+            closed_info = self._broker.get_recent_closed_position_info(
+                ticket, lookback_hours=72
+            )
+
             if closed_info is None:
-                # MT5の履歴反映に数分かかる場合があるため60秒待ってリトライ
-                import asyncio
-                await asyncio.sleep(60)
-                closed_info = self._broker.get_recent_closed_position_info(
-                    ticket, lookback_hours=72
-                )
-            if closed_info is None:
-                # 履歴が取れない場合でも、ゴーストポジション化を避けるためローカル状態は落とす。
+                if pos.close_pending_since is None:
+                    # 初回検知: タイムスタンプを記録して次サイクルへ
+                    pos.close_pending_since = now_utc()
+                    logger.debug(
+                        f"Closed position detected but history not found yet: "
+                        f"ticket={ticket}. Will retry next cycle."
+                    )
+                    continue
+
+                elapsed = elapsed_minutes(pos.close_pending_since)
+                if elapsed < 5:
+                    # 5分未満: まだ待つ
+                    logger.debug(
+                        f"Waiting for history: ticket={ticket}, "
+                        f"elapsed={elapsed:.1f}min"
+                    )
+                    continue
+
+                # 5分以上経過しても取得できない: 諦めてunregister
                 logger.warning(
                     f"Closed position history not found for ticket={ticket} "
-                    f"after retry; unregister only. P&L will not be recorded."
+                    f"after {elapsed:.1f}min; unregister only. "
+                    f"P&L will not be recorded."
                 )
                 self.unregister_position(ticket)
                 continue
 
+            # 履歴取得成功
             reason = self._infer_external_exit_reason(pos, closed_info["close_price"])
             self._finalize_closed_position(
                 pos,

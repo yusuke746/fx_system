@@ -157,6 +157,15 @@ class Orchestrator:
             if not ok:
                 logger.warning(f"Model not loaded for {pair} — predictions unavailable")
 
+        # WFV精度をモデルに設定（ブートストラップ時の既知値）
+        _default_accuracies = {
+            "USDJPY": 0.3785,
+            "EURUSD": 0.4501,
+            "GBPJPY": 0.4147,
+        }
+        for pair, acc in _default_accuracies.items():
+            self._predictor.set_model_accuracy(pair, acc)
+
         # MT5 側に残っている建玉をローカル管理へ復元
         self._restore_managed_positions_from_broker()
 
@@ -527,7 +536,8 @@ class Orchestrator:
         })
 
         # LightGBM が強いシグナルを出しているか確認
-        if not prediction.is_strong_signal(direction):
+        model_acc = self._predictor.get_model_accuracy(pair)
+        if not prediction.is_strong_signal(direction, model_acc):
             logger.info(
                 f"Signal not strong enough: {prediction.prob_up:.2f}/"
                 f"{prediction.prob_flat:.2f}/{prediction.prob_down:.2f}"
@@ -855,7 +865,7 @@ class Orchestrator:
     async def _weekly_maintenance_task(self) -> None:
         """週次メンテナンス（再学習・レポート・DB整備・ロールバック判定）。"""
         from maintenance.scheduler import weekly_maintenance
-        await weekly_maintenance(self._db_conn, self._notifier)
+        retrain_result = await weekly_maintenance(self._db_conn, self._notifier)
 
         # 執行ノイズ抑制パラメータの週次自動チューニング（AI判定ロジックは変更しない）
         from optimizer.weekend_optimizer import auto_tune_execution_noise
@@ -875,6 +885,14 @@ class Orchestrator:
         reload_result = self._predictor.load_all_models()
         trained_pairs = [p for p, ok in reload_result.items() if ok]
         skipped_pairs = [p for p, ok in reload_result.items() if not ok]
+
+        # 週次再学習後にWFV精度を更新
+        validation = retrain_result.get("retrain", {}).get("validation", {})
+        for _pair, val_result in validation.items():
+            acc = float(val_result.get("accuracy", 0.0))
+            if acc > 0:
+                self._predictor.set_model_accuracy(_pair, acc)
+                logger.info(f"Model accuracy updated after retraining: {_pair}={acc:.4f}")
 
         await self._notifier.send(
             f"週次モデル再ロード完了\n"

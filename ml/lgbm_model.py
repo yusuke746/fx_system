@@ -114,23 +114,35 @@ class PredictionResult:
     def max_prob(self) -> float:
         return max(self.prob_up, self.prob_flat, self.prob_down)
 
-    def is_strong_signal(self, signal_direction: str) -> bool:
+    def is_strong_signal(
+        self,
+        signal_direction: str,
+        model_accuracy: float = 0.40,
+    ) -> bool:
         """
-        Pineのシグナル方向と一致する確率が閾値以上か、
-        または逆方向の確率が支配的でない場合にTrueを返す。
+        ペアのモデル精度に応じて閾値を動的調整する。
 
-        signal_direction: "long" or "short"
+        精度が高い（>=0.45）: 厳しめフィルター
+        精度が中程度（>=0.40）: 現行の設定
+        精度が低い（<0.40）:  緩めフィルター
         """
-        if signal_direction == "long":
-            # longシグナルを通す条件:
-            # ① up確率が35%以上、または
-            # ② down確率が60%未満（モデルが強く否定していない）
-            return self.prob_up >= 0.35 or self.prob_down < 0.60
+        if model_accuracy >= 0.45:
+            # 精度高: モデルを信頼してより厳しくフィルター
+            direction_threshold = 0.40
+            block_threshold = 0.55
+        elif model_accuracy >= 0.40:
+            # 精度中: 現行の設定
+            direction_threshold = 0.35
+            block_threshold = 0.60
         else:
-            # shortシグナルを通す条件:
-            # ① down確率が35%以上、または
-            # ② up確率が60%未満
-            return self.prob_down >= 0.35 or self.prob_up < 0.60
+            # 精度低（USDJPY相当）: Pineシグナルを最大限尊重
+            direction_threshold = 0.30
+            block_threshold = 0.65
+
+        if signal_direction == "long":
+            return self.prob_up >= direction_threshold or self.prob_down < block_threshold
+        else:
+            return self.prob_down >= direction_threshold or self.prob_up < block_threshold
 
     @property
     def is_reverse_signal(self) -> bool:
@@ -219,6 +231,16 @@ class LGBMPredictor:
     def __init__(self, model_dir: str = "models"):
         self._model_dir = Path(model_dir)
         self._models: dict[str, object] = {}  # pair -> model
+        self._model_accuracies: dict[str, float] = {}  # pair -> WFV accuracy
+
+    def set_model_accuracy(self, pair: str, accuracy: float) -> None:
+        """WFV精度をペアごとに設定する。"""
+        self._model_accuracies[pair] = accuracy
+        logger.info(f"Model accuracy set for {pair}: {accuracy:.4f}")
+
+    def get_model_accuracy(self, pair: str) -> float:
+        """ペアのWFV精度を取得する。未設定時はデフォルト値(0.40)を返す。"""
+        return self._model_accuracies.get(pair, 0.40)
 
     def load_model(self, pair: str) -> bool:
         """指定ペアのモデルを読み込む。"""

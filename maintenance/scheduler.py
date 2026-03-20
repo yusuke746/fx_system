@@ -89,7 +89,7 @@ async def daily_maintenance(
 async def weekly_maintenance(
     db_conn: sqlite3.Connection,
     notifier: DiscordNotifier,
-) -> None:
+) -> dict:
     """毎週日曜23:00 JST 実行の週次メンテナンスタスク。"""
     logger.info("=== Weekly maintenance started ===")
     now = now_utc()
@@ -168,6 +168,7 @@ async def weekly_maintenance(
 
     await notifier.send(report)
     logger.info("=== Weekly maintenance completed ===")
+    return retrain_result
 
 
 async def monthly_maintenance(
