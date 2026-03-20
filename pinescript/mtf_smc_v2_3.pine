@@ -26,7 +26,9 @@
 strategy("FX MTF SMC v2.3", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=2)
 
 // ── 入力パラメータ ─────────────────────────────────────────────
-i_pair           = input.string("USDJPY",  "通貨ペア",             options=["USDJPY","EURUSD","GBPJPY"])
+chart_base_ccy   = syminfo.basecurrency
+chart_quote_ccy  = syminfo.currency
+i_pair           = str.length(chart_base_ccy) > 0 and str.length(chart_quote_ccy) > 0 ? str.upper(chart_base_ccy + chart_quote_ccy) : syminfo.ticker
 i_ema20_len      = input.int(20,           "4H EMA20 期間")
 i_ema50_len      = input.int(50,           "4H EMA50 期間")
 i_atr_len        = input.int(14,           "ATR期間")
@@ -257,7 +259,7 @@ if bos_1h_bear
 // =====================================================
 
 // pip_unit（通貨ペア別の1pip単位）
-pip_unit = i_pair == "USDJPY" or i_pair == "GBPJPY" ? 0.01 : 0.0001
+pip_unit = chart_quote_ccy == "JPY" ? 0.01 : 0.0001
 
 // ATR（15M）
 atr_14     = ta.atr(i_atr_len)
@@ -578,31 +580,78 @@ plotshape(choch_bull_started, style=shape.xcross, location=location.abovebar,
 plotshape(choch_bear_started, style=shape.xcross, location=location.belowbar,
      color=color.new(color.red, 0),   size=size.small, title="1H ChoCH Bear (Reversal)")
 
-// MTFスコア + 状態ラベル（最終バーのみ）
-var label lbl = na
+// ─── デバッグテーブル（右下固定） ────────────────────────────────
+var table dbg = table.new(position.bottom_right, 2, 12, bgcolor=color.new(color.black, 70), border_color=color.gray, border_width=1, frame_color=color.gray, frame_width=1)
+
 if barstate.islast
-    label.delete(lbl)
-    _pb = str.tostring(sweep_pending_bars)
-    _msb_s = sweep_bull_pending ?
-         ("Bull(" + _pb + ")") :
-         (sweep_bear_pending ?
-         ("Bear(" + _pb + ")") : "-")
-    _sw_v = str.tostring(math.round(sweep_strength, 2))
-    _sw_s = liq_sweep_qualified ?
-         ("OK " + _sw_v + "x") : ("NG " + _sw_v + "x")
-    _txt = "MTF:" + str.tostring(mtf_confluence) + "/5" +
-         "\nATR:" + str.tostring(math.round(atr_14, 5)) +
-         "\nRSI:" + str.tostring(math.round(rsi_14, 1)) +
-         "\nSweep:" + _sw_s +
-         "\nMSB:" + _msb_s +
-         "\nFVG:" + (fvg_4h_valid ? "OK" : "NG") +
-         "\nOB:" + (ob_4h_valid ? "OK" : "NG") +
-         "\nSes:" + (in_session ? "ON" : "OFF")
-    _lc = mtf_confluence >= i_confluence_min ?
-         color.green : color.gray
-    lbl := label.new(bar_index, high, _txt,
-         color=_lc, textcolor=color.white,
-         style=label.style_label_down, size=size.normal)
+    // MTFスコアの色
+    color conf_col = mtf_confluence >= 3 ? color.lime : mtf_confluence >= 2 ? color.yellow : color.gray
+
+    // Sweepの状態文字列
+    string sweep_str = liq_sweep_qualified ? "OK " + str.tostring(math.round(sweep_strength, 2)) + "x" : liq_sweep_1h ? "NG " + str.tostring(math.round(sweep_strength, 2)) + "x" : "-"
+    color sweep_col = liq_sweep_qualified ? color.lime : liq_sweep_1h ? color.yellow : color.gray
+
+    // MSBペンディング状態
+    string msb_str = sweep_bull_pending ? "Bull(" + str.tostring(sweep_pending_bars) + ")" : sweep_bear_pending ? "Bear(" + str.tostring(sweep_pending_bars) + ")" : "-"
+    color msb_col = (sweep_bull_pending or sweep_bear_pending) ? color.yellow : color.gray
+
+    // FVG状態
+    string fvg_str = fvg_4h_zone_active ? "IN(" + str.tostring(math.round(fvg_4h_fill_ratio * 100)) + "%)" : fvg_4h_valid ? "NEAR" : "NG"
+    color fvg_col = fvg_4h_zone_active ? color.lime : fvg_4h_valid ? color.yellow : color.gray
+
+    // OB状態
+    string ob_str = ob_4h_zone_active ? "IN" : ob_4h_valid ? "NEAR" : "NG"
+    color ob_col = ob_4h_zone_active ? color.lime : ob_4h_valid ? color.yellow : color.gray
+
+    // セッション
+    color ses_col = in_session ? (utc_hour >= 12 and utc_hour < 16 ? color.lime : color.yellow) : color.gray
+    string ses_str = utc_hour >= 12 and utc_hour < 16 ? "london_ny" : utc_hour >= 7 and utc_hour < 12 ? "london" : utc_hour >= 16 and utc_hour < 21 ? "ny" : "off"
+
+    // アラート発火状態
+    bool alert_firing = long_condition or short_condition
+    string alert_str = long_condition ? "LONG" : short_condition ? "SHORT" : "false"
+    color alert_col = long_condition ? color.lime : short_condition ? color.red : color.gray
+
+    // テーブル描画
+    table.cell(dbg, 0,  0, "MTF Score",   text_color=color.white,  bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  0, str.tostring(mtf_confluence) + "/5",
+                                   text_color=conf_col,     bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0,  1, "ATR ratio",   text_color=color.white,  bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  1, str.tostring(math.round(atr_ratio, 2)) + "x",
+                                   text_color=atr_ratio >= 1.0 ? color.lime : color.yellow,
+                                   bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0,  2, "RSI",         text_color=color.white,  bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  2, str.tostring(math.round(rsi_14, 1)),
+                                   text_color=color.yellow, bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0,  3, "ChoCH",       text_color=color.white,  bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  3, str.tostring(choch_1h),
+                                   text_color=choch_1h ? color.lime : color.gray,
+                                   bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0,  4, "FVG hit/align", text_color=color.white, bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  4, fvg_str,
+                                   text_color=fvg_col,      bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0,  5, "Zone hit/align", text_color=color.white, bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  5, ob_str,
+                                   text_color=ob_col,       bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0,  6, "Sweep",       text_color=color.white,  bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  6, sweep_str,
+                                   text_color=sweep_col,    bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0,  7, "MSB",         text_color=color.white,  bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  7, msb_str,
+                                   text_color=msb_col,      bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0,  8, "Candle",      text_color=color.white,  bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  8, str.tostring(prior_candle_body_ratio, "#.##"),
+                                   text_color=color.yellow, bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0,  9, "Session",     text_color=color.white,  bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1,  9, ses_str,
+                                   text_color=ses_col,      bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0, 10, "Trend",       text_color=color.white,  bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1, 10, trend_bullish ? "Bull" : "Bear",
+                                   text_color=trend_bullish ? color.lime : color.red,
+                                   bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 0, 11, "Alert firing", text_color=color.white, bgcolor=color.new(color.black, 70))
+    table.cell(dbg, 1, 11, alert_str,
+                                   text_color=alert_col,    bgcolor=color.new(color.black, 70))
 
 // セッション背景
 bgcolor(in_session ? color.new(color.blue, 95) : na, title="Active Session")
