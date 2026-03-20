@@ -256,6 +256,9 @@ if bos_1h_bear
 // セクション3: 15分足インジケーター + Sweep→MSBステートマシン
 // =====================================================
 
+// pip_unit（通貨ペア別の1pip単位）
+pip_unit = i_pair == "USDJPY" or i_pair == "GBPJPY" ? 0.01 : 0.0001
+
 // ATR（15M）
 atr_14     = ta.atr(i_atr_len)
 atr_avg_20 = ta.sma(atr_14, i_atr_avg * (60 / 15))  // 20日平均
@@ -389,6 +392,21 @@ if msb_15m_bear
     sweep_bear_pending := false
     sweep_pending_bars := 0
 
+// ── 対向流動性ターゲット（TP候補3種）[NEW Phase2] ─────────────
+
+// TP候補1: 直近1H Swing High/Low（既存変数を再利用）
+tp_swing_long_pips  = not na(last_swing_high_1h) ?
+     math.abs(last_swing_high_1h - close) / pip_unit : 0.0
+tp_swing_short_pips = not na(last_swing_low_1h) ?
+     math.abs(close - last_swing_low_1h) / pip_unit : 0.0
+
+// TP候補2: FVGゾーンの反対側エッジ（既存変数を再利用）
+// Bullish FVG: 上エッジ(fvg_4h_top)まで / Bearish FVG: 下エッジ(fvg_4h_bottom)まで
+tp_fvg_long_pips  = (fvg_4h_valid and fvg_4h_is_bull and not na(fvg_4h_top)) ?
+     math.abs(fvg_4h_top - close) / pip_unit : 0.0
+tp_fvg_short_pips = (fvg_4h_valid and not fvg_4h_is_bull and not na(fvg_4h_bottom)) ?
+     math.abs(close - fvg_4h_bottom) / pip_unit : 0.0
+
 
 // =====================================================
 // セクション4: MTF合致スコア計算（最大5点）
@@ -476,7 +494,7 @@ f_build_json(dir, msb_conf, choch_flag) =>
     _p4 = ',"rsi_14":' + str.tostring(math.round(rsi_14, 2)) + ',"rsi_zone":' + str.tostring(rsi_zone) + ',"macd_histogram":' + str.tostring(math.round(macd_hist, 6)) + ',"macd_signal_cross":' + str.tostring(_mc)
     _p5 = ',"stoch_k":' + str.tostring(math.round(stoch_k, 2)) + ',"stoch_d":' + str.tostring(math.round(stoch_d, 2)) + ',"momentum_3bar":' + str.tostring(math.round(momentum_3bar, 4))
     _p6 = ',"close_vs_ema20_4h":' + str.tostring(math.round(close_vs_ema20_4h, 4)) + ',"close_vs_ema50_4h":' + str.tostring(math.round(close_vs_ema50_4h, 4)) + ',"high_low_range_15m":' + str.tostring(math.round(high_low_range_15m, 5))
-    _p7 = ',"ob_4h_distance_pips":' + str.tostring(math.round(ob_4h_distance, 4)) + ',"fvg_4h_fill_ratio":' + str.tostring(math.round(fvg_4h_fill_ratio, 4)) + ',"liq_sweep_strength":' + str.tostring(math.round(sweep_strength, 4))
+    _p7 = ',"ob_4h_distance_pips":' + str.tostring(math.round(ob_4h_distance, 4)) + ',"fvg_4h_fill_ratio":' + str.tostring(math.round(fvg_4h_fill_ratio, 4)) + ',"liq_sweep_strength":' + str.tostring(math.round(sweep_strength, 4)) + ',"tp_swing_pips":' + str.tostring(math.round(dir == "long" ? tp_swing_long_pips : tp_swing_short_pips, 1)) + ',"tp_fvg_pips":' + str.tostring(math.round(dir == "long" ? tp_fvg_long_pips : tp_fvg_short_pips, 1))
     _p8 = ',"prior_candle_body_ratio":' + str.tostring(math.round(prior_candle_body_ratio, 4)) + ',"consecutive_same_dir":' + str.tostring(consecutive_same_dir) + ',"pivot_proximity":' + str.tostring(math.round(pivot_proximity, 4)) + ',"sweep_pending_bars":' + str.tostring(sweep_pending_bars)
     _p9 = ',"vol_ok":' + str.tostring(vol_ok) + ',"quality_gate_pass":' + str.tostring(quality_gate_pass) + ',"in_session":' + str.tostring(in_session) + ',"is_friday_late":' + str.tostring(is_friday_late) + ',"alert_mode":"' + i_alert_mode + '"'
     _p1 + _p2 + _p3 + _p4 + _p5 + _p6 + _p7 + _p8 + _p9 + '}'

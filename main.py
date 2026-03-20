@@ -571,6 +571,8 @@ class Orchestrator:
                     pair,
                     config,
                     ob_4h_distance_pips=payload.get("ob_4h_distance_pips", 0.0),
+                    tp_swing_pips=payload.get("tp_swing_pips", 0.0),
+                    tp_fvg_pips=payload.get("tp_fvg_pips", 0.0),
                 )
                 lot = calc_lot_size(
                     self._broker.get_account_balance(),
@@ -645,6 +647,8 @@ class Orchestrator:
             pair,
             config,
             ob_4h_distance_pips=payload.get("ob_4h_distance_pips", 0.0),
+            tp_swing_pips=payload.get("tp_swing_pips", 0.0),
+            tp_fvg_pips=payload.get("tp_fvg_pips", 0.0),
         )
         lot = calc_lot_size(
             self._broker.get_account_balance(),

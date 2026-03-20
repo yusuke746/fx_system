@@ -141,13 +141,16 @@ def calc_sl_tp_pips(
     pair: str,
     trading_config: dict,
     ob_4h_distance_pips: float | None = None,
+    tp_swing_pips: float | None = None,
+    tp_fvg_pips: float | None = None,
 ) -> tuple[float, float]:
     """
     ATR と構造距離からSL/TP（pips）を計算する。
 
     - SL は従来どおり ATR ベース
-    - TP は Pine から渡された ob_4h_distance_pips を優先
-    - 構造距離が無効な場合のみ、SL比ベースの保守的フォールバックを使う
+    - TP は Pine から渡された3候補（tp_swing_pips / tp_fvg_pips / ob_4h_distance_pips）から選択
+      条件: R:R 1.5以上の候補のうち最小値を採用（到達しやすいTPを優先）
+      候補が0件の場合: SL × 1.5 をフォールバック
 
     Returns:
         (sl_pips, tp_pips)
@@ -159,24 +162,30 @@ def calc_sl_tp_pips(
 
     # ATR → pips変換（USDJPY/GBPJPY は 0.01=1pip, EURUSD は 0.0001=1pip）
     if pair in ("USDJPY", "GBPJPY"):
-        atr_pips = atr * 100      # 例: 0.45 → 45pips
+        atr_pips = atr * 100
     else:
-        atr_pips = atr * 10000    # 例: 0.0045 → 45pips
+        atr_pips = atr * 10000
 
     sl_pips = max(sl_min, min(atr_pips * sl_mult, sl_max))
 
-    # 構造ターゲットは直近4H壁までの距離を使う。
-    # 極端に小さい/大きい値は約定ノイズや異常値の可能性があるのでキャップする。
-    structural_tp = abs(float(ob_4h_distance_pips or 0.0))
-    if structural_tp <= 0:
+    tp_min_rr = 1.5  # R:R最低保証（SLの1.5倍）
+    tp_rr_floor = sl_pips * tp_min_rr
+
+    candidates = []
+    for val in [tp_swing_pips, tp_fvg_pips, ob_4h_distance_pips]:
+        v = abs(float(val or 0.0))
+        if v >= tp_rr_floor:
+            candidates.append(v)
+
+    if candidates:
+        tp_candidate = min(candidates)
+    else:
         logger.warning(
-            f"ob_4h_distance_pips missing for {pair}. "
-            f"Fallback TP uses 1.5x SL ({sl_pips:.1f} pips base)"
+            f"No valid TP candidate for {pair} (all < R:R {tp_min_rr}). "
+            f"Using SL×1.5 fallback ({sl_pips:.1f} pips base)"
         )
-        structural_tp = sl_pips * 1.5
+        tp_candidate = tp_rr_floor
 
-    tp_min = max(5.0, sl_min * 0.5)
-    tp_max = max(tp_min, sl_max * 3.0)
-    tp_pips = max(tp_min, min(structural_tp, tp_max))
+    tp_pips = round(min(tp_candidate, sl_max * 3.0), 1)
 
-    return round(sl_pips, 1), round(tp_pips, 1)
+    return round(sl_pips, 1), tp_pips
