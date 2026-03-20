@@ -13,7 +13,7 @@ LightGBM 学習・ウォークフォワード検証モジュール
   - 学習ログ: 保存基準（UTC）
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import lightgbm as lgb
@@ -76,22 +76,94 @@ def train_model(
 def walk_forward_validate(
     X: np.ndarray,
     y: np.ndarray,
+    signal_times: list[datetime] | None = None,
     train_days: int = 60,
     val_days: int = 15,
-    samples_per_day: int = 96,  # 15分足 = 96本/日
+    samples_per_day: int = 96,  # signal_timesがNoneの場合のフォールバック
 ) -> dict:
     """
     ウォークフォワード検証を実行する。
 
+    signal_times が渡された場合はカレンダー日付ベースでフォールドを分割する。
+    None の場合はサンプル数ベースのレガシーロジックで動作する。
+
     Returns:
-        {"sharpe_ratio": float, "accuracy": float, "fold_results": list}
+        {"accuracy": float, "fold_results": list, "n_folds": int, "date_based": bool, "total_samples": int}
     """
+    total_samples = len(X)
+
+    if signal_times is not None:
+        times = np.array(signal_times)
+        fold_results = []
+        fold = 0
+        t_start = times[0]
+
+        while True:
+            train_start_dt = t_start + timedelta(days=fold * val_days)
+            train_end_dt = train_start_dt + timedelta(days=train_days)
+            val_end_dt = train_end_dt + timedelta(days=val_days)
+
+            if val_end_dt > times[-1]:
+                break
+
+            train_mask = (times >= train_start_dt) & (times < train_end_dt)
+            val_mask = (times >= train_end_dt) & (times < val_end_dt)
+
+            X_train, y_train = X[train_mask], y[train_mask]
+            X_val, y_val = X[val_mask], y[val_mask]
+
+            if len(X_train) < train_days:  # train_days 分のサンプルに満たない場合はスキップ
+                fold += 1
+                continue
+
+            if len(X_val) == 0:
+                fold += 1
+                continue
+
+            model = lgb.LGBMClassifier(**LGBM_PARAMS)
+            model.fit(X_train, y_train, feature_name=FEATURE_NAMES)
+            y_pred = model.predict(X_val)
+            accuracy = float(np.mean(y_pred == y_val))
+
+            fold_results.append({
+                "fold": fold,
+                "train_samples": len(X_train),
+                "val_samples": len(X_val),
+                "accuracy": accuracy,
+            })
+            fold += 1
+
+        if len(fold_results) < 2:
+            logger.warning(
+                "walk_forward_validate: fewer than 2 folds available, returning empty results."
+            )
+            return {
+                "accuracy": 0.0,
+                "fold_results": [],
+                "n_folds": 0,
+                "date_based": True,
+                "total_samples": total_samples,
+            }
+
+        avg_accuracy = float(np.mean([r["accuracy"] for r in fold_results]))
+        logger.info(
+            f"Walk-forward validation (date-based): {len(fold_results)} folds, "
+            f"avg accuracy={avg_accuracy:.4f}"
+        )
+        return {
+            "accuracy": avg_accuracy,
+            "fold_results": fold_results,
+            "n_folds": len(fold_results),
+            "date_based": True,
+            "total_samples": total_samples,
+        }
+
+    # フォールバック: サンプル数ベース（後方互換）
+    logger.warning("walk_forward_validate: signal_times not provided, using sample count fallback.")
     train_size = train_days * samples_per_day
     val_size = val_days * samples_per_day
 
     fold_results = []
-    total_samples = len(X)
-
     start = 0
     fold = 0
     while start + train_size + val_size <= total_samples:
@@ -105,19 +177,19 @@ def walk_forward_validate(
         model.fit(X_train, y_train, feature_name=FEATURE_NAMES)
 
         y_pred = model.predict(X_val)
-        accuracy = np.mean(y_pred == y_val)
+        accuracy = float(np.mean(y_pred == y_val))
 
         fold_results.append({
             "fold": fold,
             "train_samples": len(X_train),
             "val_samples": len(X_val),
-            "accuracy": float(accuracy),
+            "accuracy": accuracy,
         })
 
         start += val_size
         fold += 1
 
-    avg_accuracy = np.mean([r["accuracy"] for r in fold_results]) if fold_results else 0.0
+    avg_accuracy = float(np.mean([r["accuracy"] for r in fold_results])) if fold_results else 0.0
 
     logger.info(
         f"Walk-forward validation: {len(fold_results)} folds, "
@@ -125,8 +197,11 @@ def walk_forward_validate(
     )
 
     return {
-        "accuracy": float(avg_accuracy),
+        "accuracy": avg_accuracy,
         "fold_results": fold_results,
+        "n_folds": len(fold_results),
+        "date_based": False,
+        "total_samples": total_samples,
     }
 
 

@@ -91,8 +91,6 @@ def _normalize_trading_config(config: dict) -> dict:
     risk = config.setdefault("risk", {})
 
     # 新しいダイナミック・エグジット戦略の既定値。
-    risk.setdefault("exit_prob_threshold", 0.35)
-    risk.setdefault("exit_prob_stale_minutes", 30)
     risk.setdefault("time_decay_minutes", 60)
     risk.setdefault("time_decay_min_profit_atr", 0.5)
     risk.setdefault("trailing_update_cooldown_seconds", 30)

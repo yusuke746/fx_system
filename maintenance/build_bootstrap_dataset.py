@@ -19,6 +19,7 @@ TradingView CSV から初期学習用データセットを生成する。
 from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -115,6 +116,65 @@ def _label_from_return(return_pips: float, atr_price: float, pair: str) -> int:
     return 1
 
 
+def _calc_sl_tp_pips(atr_value: float, pair: str) -> tuple[float, float]:
+    """ATR値からSL/TPのpips幅を計算する（config.jsonのriskパラメータ相当）。"""
+    sl_multiplier = 1.5
+    sl_min_pips = 15.0
+    sl_max_pips = 35.0
+    tp_min_ratio = 1.5
+
+    if pair in ("USDJPY", "GBPJPY"):
+        atr_pips = atr_value * 100
+    else:
+        atr_pips = atr_value * 10000
+
+    sl_pips = max(sl_min_pips, min(atr_pips * sl_multiplier, sl_max_pips))
+    tp_pips = max(sl_pips * tp_min_ratio, sl_pips * 1.5)
+    return sl_pips, tp_pips
+
+
+def _simulate_label(
+    row_idx: int,
+    df: pd.DataFrame,
+    direction: str,
+    entry_price: float,
+    sl_pips: float,
+    tp_pips: float,
+    pair: str,
+    horizon_bars: int = 16,
+) -> int:
+    """
+    エントリー後のhorizon_bars本分のhigh/lowを参照し、
+    SL/TPのどちらが先に当たるかでラベルを決定する。
+
+    Returns:
+        0: TP到達（勝ち）
+        1: horizon_bars経過しても未決（flat）
+        2: SL到達（負け）
+    """
+    pip_unit = _pip_unit(pair)
+    future_bars = df.iloc[row_idx + 1: row_idx + horizon_bars + 1]
+
+    if direction == "long":
+        tp_price = entry_price + tp_pips * pip_unit
+        sl_price = entry_price - sl_pips * pip_unit
+        for _, bar in future_bars.iterrows():
+            if bar["high"] >= tp_price:
+                return 0
+            if bar["low"] <= sl_price:
+                return 2
+    else:  # short
+        tp_price = entry_price - tp_pips * pip_unit
+        sl_price = entry_price + sl_pips * pip_unit
+        for _, bar in future_bars.iterrows():
+            if bar["low"] <= tp_price:
+                return 0
+            if bar["high"] >= sl_price:
+                return 2
+
+    return 1
+
+
 def _find_time_col(df: pd.DataFrame) -> str:
     for c in ("time", "Time", "timestamp", "Timestamp", "date", "Date"):
         if c in df.columns:
@@ -128,6 +188,17 @@ def build_dataset(input_path: Path, output_path: Path, pair: str, horizon_bars: 
     missing = [c for c in FEATURE_COLS + ["CSV_direction", "CSV_close_price"] if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
+
+    if "high" not in df.columns or "low" not in df.columns:
+        warnings.warn(
+            f"{input_path}: 'high'/'low' columns not found. Using 'close' as substitute for SL/TP simulation.",
+            UserWarning,
+            stacklevel=2,
+        )
+        if "high" not in df.columns:
+            df["high"] = df["close"]
+        if "low" not in df.columns:
+            df["low"] = df["close"]
 
     signal_df = df.dropna(subset=["CSV_direction"]).copy()
 
@@ -143,14 +214,20 @@ def build_dataset(input_path: Path, output_path: Path, pair: str, horizon_bars: 
     pu = _pip_unit(pair)
     signal_df["future_return_pips"] = (signal_df["future_close_price"] - signal_df["CSV_close_price"]) / pu
 
-    signal_df["label"] = signal_df.apply(
-        lambda r: _label_from_return(
-            return_pips=float(r["future_return_pips"]),
-            atr_price=float(r["CSV_atr_14"]),
+    def _label_for_row(i: int, row: pd.Series) -> int:
+        sl_pips, tp_pips = _calc_sl_tp_pips(float(row["CSV_atr_14"]), pair)
+        return _simulate_label(
+            row_idx=i,
+            df=df,
+            direction="long" if row["CSV_direction"] == 1.0 else "short",
+            entry_price=float(row["CSV_close_price"]),
+            sl_pips=sl_pips,
+            tp_pips=tp_pips,
             pair=pair,
-        ),
-        axis=1,
-    )
+            horizon_bars=horizon_bars,
+        )
+
+    signal_df["label"] = [_label_for_row(i, row) for i, row in signal_df.iterrows()]
 
     signal_df["pair"] = pair
     signal_df["direction"] = signal_df["CSV_direction"].map({1.0: "long", 2.0: "short"})

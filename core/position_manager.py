@@ -4,11 +4,10 @@
 ■ エグジット優先順位（ダイナミック・エグジット版）
   1. Calendar Veto 強制クローズ（最高優先）
   2. ATR動的SL到達（MT5 OCO注文）
-    3. ML確率減衰エグジット
-    4. タイムディケイ撤退
-    5. 構造的ターゲット到達
-    6. トレイリングストップ
-    7. 運用安全のための金曜クローズ（補助安全弁）
+  3. time_decay（時間切れ撤退）
+  4. structural TP（構造目標到達）
+  5. trailing stop（利益追従）
+  6. 金曜クローズ（安全弁）
 
 ■ ドテン制限
   - エントリーから15分未満は無視（一時的逆行）
@@ -196,45 +195,27 @@ class PositionManager:
             if current_price is None:
                 continue
 
-            # 優先1: Calendar Veto 強制クローズは Orchestrator 側で処理
+            # 優先1: Calendar Veto強制クローズ（Orchestrator側で処理）
+            # 優先2: ATR動的SL到達（MT5 OCO注文）
 
-            # 優先3: 確率減衰。最新の同一ペア予測が弱くなったら撤退する。
-            if self._should_exit_prob_decay(pos, risk):
-                await self._force_close(pos, "prob_decay", current_price)
-                continue
-
-            # 優先4: 時間減衰。時間経過後も伸びないポジションを切る。
+            # 優先3: time_decay（時間切れ撤退）
             if self._should_exit_time_decay(pos, current_price, risk):
                 await self._force_close(pos, "time_decay", current_price)
                 continue
 
-            # 優先5: 構造的ターゲット到達。
+            # 優先4: structural TP（構造目標到達）
             if self._has_hit_structural_target(pos, current_price):
                 await self._force_close(pos, "structural_tp", current_price)
                 continue
 
-            # 優先6: トレーリングストップ
+            # 優先5: trailing stop（利益追従）
             if pos.trailing_active:
                 await self._update_trailing_stop(pos, current_price, risk)
 
-            # 優先7: 金曜クローズは戦略ではなく運用安全弁として維持する。
+            # 優先6: 金曜クローズ（安全弁）
             if is_friday_close_window(now_utc()):
                 await self._force_close(pos, "time_exit", current_price)
                 continue
-
-    def _should_exit_prob_decay(self, pos: ManagedPosition, risk: dict) -> bool:
-        """最新予測の方向優位が消えたときに撤退する。"""
-        threshold = float(risk.get("exit_prob_threshold", 0.35))
-        stale_minutes = float(risk.get("exit_prob_stale_minutes", 30))
-        if pos.last_prediction_at_utc is None:
-            return False
-        if elapsed_minutes(pos.last_prediction_at_utc) > stale_minutes:
-            return False
-        if pos.direction == "long":
-            return pos.prob_up < threshold
-        if pos.direction == "short":
-            return pos.prob_down < threshold
-        return False
 
     def _should_exit_time_decay(
         self,

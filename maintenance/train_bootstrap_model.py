@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_xy(input_path: Path, pair: str) -> tuple[np.ndarray, np.ndarray, int]:
+def _load_xy(input_path: Path, pair: str) -> tuple[np.ndarray, np.ndarray, int, list | None]:
     df = pd.read_csv(input_path)
 
     if "pair" in df.columns:
@@ -51,7 +51,15 @@ def _load_xy(input_path: Path, pair: str) -> tuple[np.ndarray, np.ndarray, int]:
 
     X = df[FEATURE_NAMES].to_numpy(dtype=np.float64)
     y = df["label"].astype(int).to_numpy(dtype=np.int32)
-    return X, y, dropped
+
+    signal_times = None
+    if "signal_time" in df.columns:
+        parsed = pd.to_datetime(df["signal_time"], errors="coerce", utc=True)
+        times_list = [t.to_pydatetime() for t in parsed if pd.notna(t)]
+        if len(times_list) == len(X):
+            signal_times = times_list
+
+    return X, y, dropped, signal_times
 
 
 def main() -> None:
@@ -60,15 +68,15 @@ def main() -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_path}")
 
-    X, y, dropped = _load_xy(input_path=input_path, pair=args.pair)
+    X, y, dropped, signal_times = _load_xy(input_path=input_path, pair=args.pair)
 
     if len(X) < args.min_samples:
         raise ValueError(f"insufficient_samples({len(X)}<{args.min_samples})")
 
     if not args.skip_wfv:
-        val = walk_forward_validate(X, y)
+        val = walk_forward_validate(X, y, signal_times=signal_times)
         print(f"walk_forward_accuracy={val.get('accuracy', 0.0):.4f}")
-        print(f"walk_forward_folds={len(val.get('fold_results', []))}")
+        print(f"walk_forward_folds={val.get('n_folds', len(val.get('fold_results', [])))}")
 
     train_model(X, y, pair=args.pair, model_dir=args.model_dir)
 

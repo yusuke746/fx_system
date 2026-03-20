@@ -222,7 +222,14 @@ def retrain_models_from_db(
                 f"required={min_directional_samples}. Continue training (ML-priority mode)."
             )
 
-        val = walk_forward_validate(X, y)
+        val = walk_forward_validate(
+            X,
+            y,
+            signal_times=[
+                datetime.fromisoformat(r["signal_time"]) for r in rows
+                if r.get("signal_time")
+            ],
+        )
         cv_acc = float(val.get("accuracy", 0.0))
         if cv_acc < min_cv_accuracy:
             logger.warning(
