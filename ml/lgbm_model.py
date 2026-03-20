@@ -111,15 +111,28 @@ class PredictionResult:
     def max_prob(self) -> float:
         return max(self.prob_up, self.prob_flat, self.prob_down)
 
-    @property
-    def is_strong_signal(self) -> bool:
-        """65% 以上の確率で方向が出ているかどうか。"""
-        return self.max_prob >= 0.65
+    def is_strong_signal(self, signal_direction: str) -> bool:
+        """
+        Pineのシグナル方向と一致する確率が閾値以上か、
+        または逆方向の確率が支配的でない場合にTrueを返す。
+
+        signal_direction: "long" or "short"
+        """
+        if signal_direction == "long":
+            # longシグナルを通す条件:
+            # ① up確率が35%以上、または
+            # ② down確率が70%未満（モデルが強く否定していない）
+            return self.prob_up >= 0.35 or self.prob_down < 0.70
+        else:
+            # shortシグナルを通す条件:
+            # ① down確率が35%以上、または
+            # ② up確率が70%未満
+            return self.prob_down >= 0.35 or self.prob_up < 0.70
 
     @property
     def is_reverse_signal(self) -> bool:
-        """ドテン判定用: 逆方向が65%以上か。"""
-        return self.is_strong_signal and self.direction != "flat"
+        """ドテン判定用: 逆方向が強く示唆されているか"""
+        return self.max_prob >= 0.75 and self.direction != "flat"
 
 
 def build_features(

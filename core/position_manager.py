@@ -313,8 +313,18 @@ class PositionManager:
 
             closed_info = self._broker.get_recent_closed_position_info(ticket)
             if closed_info is None:
+                # MT5の履歴反映に数分かかる場合があるため60秒待ってリトライ
+                import asyncio
+                await asyncio.sleep(60)
+                closed_info = self._broker.get_recent_closed_position_info(
+                    ticket, lookback_hours=72
+                )
+            if closed_info is None:
                 # 履歴が取れない場合でも、ゴーストポジション化を避けるためローカル状態は落とす。
-                logger.warning(f"Closed position history not found for ticket={ticket}; unregister only")
+                logger.warning(
+                    f"Closed position history not found for ticket={ticket} "
+                    f"after retry; unregister only. P&L will not be recorded."
+                )
                 self.unregister_position(ticket)
                 continue
 

@@ -513,7 +513,7 @@ class Orchestrator:
         })
 
         # LightGBM が強いシグナルを出しているか確認
-        if not prediction.is_strong_signal:
+        if not prediction.is_strong_signal(direction):
             logger.info(
                 f"Signal not strong enough: {prediction.prob_up:.2f}/"
                 f"{prediction.prob_flat:.2f}/{prediction.prob_down:.2f}"
@@ -553,7 +553,7 @@ class Orchestrator:
 
         if existing_positions:
             pos = existing_positions[0]
-            if prediction.direction != pos.direction:
+            if direction != pos.direction:
                 # 逆方向シグナル → ドテン判定
                 if not self._position_manager.check_entry_age(pos.ticket, min_minutes=15):
                     logger.info(f"Doten ignored: entry too recent (< 15min)")
@@ -579,16 +579,16 @@ class Orchestrator:
                     sl_pips, pair, self._risk_config,
                 )
                 sl_price, tp_price = self._calc_sl_tp_price(
-                    pair, prediction.direction, close_price, sl_pips, tp_pips,
+                    pair, direction, close_price, sl_pips, tp_pips,
                 )
                 ok, new_ticket, sl_price, tp_price = await self._position_manager.execute_doten(
-                    pair, pos.ticket, prediction.direction,
+                    pair, pos.ticket, direction,
                     lot, sl_pips, tp_pips, close_price,
                 )
                 if ok and new_ticket:
                     trade_id = insert_trade(self._db_conn, {
                         "pair": pair,
-                        "direction": prediction.direction,
+                        "direction": direction,
                         "open_time": now_utc(),
                         "open_price": close_price,
                         "volume": lot,
@@ -600,7 +600,7 @@ class Orchestrator:
                         trade_id=trade_id,
                         ticket=new_ticket,
                         pair=pair,
-                        direction=prediction.direction,
+                        direction=direction,
                         volume=lot,
                         open_price=close_price,
                         sl_price=sl_price,
@@ -655,17 +655,17 @@ class Orchestrator:
             sl_pips, pair, self._risk_config,
         )
         sl_price, tp_price = self._calc_sl_tp_price(
-            pair, prediction.direction, close_price, sl_pips, tp_pips,
+            pair, direction, close_price, sl_pips, tp_pips,
         )
 
         ok, ticket, sl_price, tp_price = await self._broker.open_position_async(
-            pair, prediction.direction, lot, sl_pips, tp_pips,
+            pair, direction, lot, sl_pips, tp_pips,
         )
 
         if ok and ticket:
             trade_record = {
                 "pair": pair,
-                "direction": prediction.direction,
+                "direction": direction,
                 "open_time": now_utc(),
                 "open_price": close_price,
                 "volume": lot,
@@ -679,7 +679,7 @@ class Orchestrator:
                 trade_id=trade_id,
                 ticket=ticket,
                 pair=pair,
-                direction=prediction.direction,
+                direction=direction,
                 volume=lot,
                 open_price=close_price,
                 sl_price=sl_price,
@@ -696,7 +696,7 @@ class Orchestrator:
             self._position_manager.register_position(managed)
 
             await self._notifier.send(
-                f"新規エントリー: {pair} {prediction.direction}\n"
+                f"新規エントリー: {pair} {direction}\n"
                 f"Lot: {lot} / SL: {sl_price} / TP: {tp_price}\n"
                 f"LightGBM: up={prediction.prob_up:.2f} flat={prediction.prob_flat:.2f} "
                 f"down={prediction.prob_down:.2f}"
