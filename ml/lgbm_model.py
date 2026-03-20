@@ -88,6 +88,7 @@ LGBM_PARAMS = {
     "objective": "multiclass",
     "num_class": 3,   # 上昇 / 横ばい / 下落
     "verbosity": -1,
+    "class_weight": "balanced",
 }
 
 
