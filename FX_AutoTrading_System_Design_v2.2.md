@@ -1,6 +1,6 @@
 # FX自動売買システム 詳細設計書 v2.3
 
-> 実装同期メモ: 現行コードは LightGBM 35特徴量、Pine `mtf_smc_v2_3.pine`、動的エグジット（`prob_decay` / `time_decay` / `structural_tp` / trailing）に移行済みです。本文に旧 v2.2 前提の記述が残る場合は、この注記と実装を優先してください。
+> 実装同期メモ: 現行コードは LightGBM 35特徴量、Pine `mtf_smc_v2_3.pine`、動的エグジット（`time_decay` / `structural_tp` / trailing）に移行済みです。本文に旧 v2.2 前提の記述が残る場合は、この注記と実装を優先してください。
 
 **対象通貨:** USD/JPY · EUR/USD · GBP/JPY（GOLD: v3.0以降）
 **実行環境:** Windows レンタルサーバー（常時稼働 / VPS）
@@ -37,7 +37,7 @@
 | Python Veto A   | カレンダーIFルール（FOMC/雇用統計等の前後30分を即時ブロック）                        | Python         |
 | Python Veto B   | GPT-5.2の突発イベントフラグ（`unexpected_veto: true`）                             | Python         |
 | LightGBM        | 35特徴量（MTF SMC版）→ 上昇/横ばい/下落 確率出力                                    | LightGBM 4.x   |
-| エグジット      | ATR動的SL / probability decay / time decay / structural TP / trailing / 金曜クローズ | Python         |
+| エグジット      | ATR動的SL / time decay / structural TP / trailing / 金曜クローズ | Python         |
 | ブローカー      | XMTrading KIWA極口座 / MT5 Python / asyncio + ThreadPoolExecutor(max_workers=1)      | MetaTrader5    |
 
 ### 1.2 クリティカルパス（目標500ms以内）
@@ -58,7 +58,7 @@
           → 差分あり or 急変 or 期限切れ の時のみ GPT-5.2呼び出し
           → 3回連続スキップなら低消費モード（次の呼び出しは90分後に延長）
 
-毎1分:   ポジション監視（prob_decay・time_decay・structural_tp・トレーリング・金曜Exit）
+毎1分:   ポジション監視（time_decay・ structural_tp・トレーリング・金曜Exit）
 
 毎日深夜01:00 JST:  DBメンテ・バックアップ・カレンダーキャッシュ更新
 
@@ -274,11 +274,10 @@ SL_TP_MAX_PIPS = 35
 | ------------------- | ------------------------- | -------------------------------------------------------- |
 | **1（最高）** | Calendar Veto強制クローズ | 重要指標前後の veto 発動時は全ポジション強制クローズ     |
 | **2**         | ATR動的SL到達             | MT5のOCO注文として設定済み（SL=ATR×1.5）。MT5が自動執行 |
-| **3**         | Probability decay         | 最新LightGBM確率が閾値未満まで劣化したら手仕舞い         |
-| **4**         | Time decay                | 一定時間経過後も期待利益が伸びないポジションを解消       |
-| **5**         | Structural TP             | 4H OB距離ベースの目標到達で利確                          |
-| **6**         | トレーリングストップ      | 高値/安値更新に応じてATRベースで追従                     |
-| **7**         | 金曜安全クローズ          | 金曜クローズ前に残ポジションを解消                       |
+| **3**         | Time decay                | 一定時間経過後も期待利益が伸びないポジションを解消       |
+| **4**         | Structural TP             | 4H OB距離ベースの目標到達で利確                          |
+| **5**         | トレーリングストップ      | 高値/安値更新に応じてATRベースで追従                     |
+| **6**         | 金曜安全クローズ          | 金曜クローズ前に残ポジションを解消                       |
 
 ### 5.2 ドテンインターバル制限（v2.2新規）
 
@@ -376,7 +375,7 @@ CREATE TABLE trades (
     tp_price    REAL,
     pnl_pips    REAL,
     pnl_jpy     REAL,
-    exit_reason TEXT,                  -- 'atr_sl'|'prob_decay'|'time_decay'|'structural_tp'|'trailing_stop'|'calendar_veto'|'friday_close'
+    exit_reason TEXT,                  -- 'atr_sl'|'doten'|'time_exit'|'calendar_veto'|'trailing'|'time_decay'|'structural_tp'
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -475,7 +474,7 @@ STEP 4: 変更時のみ config.json に反映
 | ----------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | **Phase 1** | Week 1〜2   | ① KIWA極デモ口座 + MT5（VPS）起動確認 ② Pine Script MTF SMC ③ Webhook受信（FastAPI）+ 署名検証 ④ MT5発注テスト                                              | MT5手動発注OK / Webhook署名検証OK / 4H FVGゾーン正常表示            |
 | **Phase 2** | Week 3〜4   | ① GPT-5.2差分検知タスク ② Veto 2層 ③ 経済指標カレンダーAPI連携 ④ api_call_log                                                                               | 1日の呼び出し回数10〜25回 / FOMC前後でVeto A自動発動                |
-| **Phase 3** | Week 5〜7   | ① 32特徴量エンジニアリング ② LightGBM学習（3ペア独立）③ ウォークフォワード検証 ④ ATR動的SL/TP ⑤ バックテスト                                               | WF検証: 平均Sharpe比>1.0 / 最大DD<15% / SMC特徴量が重要度上位       |
+| **Phase 3** | Week 5、7   | ① 35特徴量エンジニアリング ② LightGBM学習（3ペア独立）③ ウォークフォワード検証 ④ ATR動的SL/TP ⑤ バックテスト                                               | WF検証: 平均Sharpe比>1.0 / 最大DD<15% / SMC特徴量が重要度上位       |
 | **Phase 4** | Week 8〜9   | ① ドテン高速連続発注 + インターバル制限 ② スケールアウト ③ 相関リスク管理 ④**フォールバック全パターン実装（付録D参照）** ⑤ DBスキーマ + 全自動メンテ | ドテン動作確認 / インターバル誤動作なし / 1週間の自動メンテ正常動作 |
 | **Phase 5** | Week 10〜13 | ① デモ口座1ヶ月フル稼働 ② GPT-5.2コスト週次記録 ③ 週末最適化収束確認 ④ Discord監視・週次レポート                                                            | 勝率>50% / 最大DD<10% / 週末最適化が3週間安定収束                   |
 | **Phase 6** | Week 14〜   | ① 本番口座移行（最小ロット0.01から）② 本番スプレッドで再バックテスト ③ 週次レビュー定例化                                                                    | 3ヶ月デモと同等 / 月次純損益（APIコスト差引後）がプラス             |

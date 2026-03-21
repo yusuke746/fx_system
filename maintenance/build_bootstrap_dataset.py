@@ -222,18 +222,17 @@ def build_dataset(input_path: Path, output_path: Path, pair: str, horizon_bars: 
             pair=pair,
             horizon_bars=horizon_bars,
         )
-        return label, tp_pips
+        return label
 
     results = [_label_for_row(i, row) for i, row in signal_df.iterrows()]
-    signal_df["label"] = [r[0] for r in results]
-    signal_df["tp_distance_pips"] = [r[1] for r in results]
+    signal_df["label"] = results
 
     signal_df["pair"] = pair
     signal_df["direction"] = signal_df["CSV_direction"].map({1.0: "long", 2.0: "short"})
     signal_df["session_type"] = 0    # CSVには時刻なし → 0固定
     signal_df["day_of_week"] = 0     # 同上 → 0固定
 
-    model_df = signal_df[["pair", "signal_time", "direction", "CSV_close_price", *FEATURE_COLS, "future_close_price", "future_return_pips", "tp_distance_pips", "session_type", "day_of_week", "label"]].copy()
+    model_df = signal_df[["pair", "signal_time", "direction", "CSV_close_price", *FEATURE_COLS, "future_close_price", "future_return_pips", "session_type", "day_of_week", "label"]].copy()
     model_df = model_df.rename(columns=RENAME_TO_MODEL | {"CSV_close_price": "close_price"})
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

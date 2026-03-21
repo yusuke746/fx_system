@@ -416,15 +416,6 @@ class Orchestrator:
             "open_positions_count": len(self._position_manager.positions),
         }
 
-        # 特徴量用のTP距離を事前計算（推論に使うだけ。実際の発注には後で再計算）
-        _pre_config = get_trading_config()
-        _pre_sl, _pre_tp = calc_sl_tp_pips(
-            atr, pair, _pre_config,
-            ob_4h_distance_pips=payload.get("ob_4h_distance_pips", 0.0),
-            tp_swing_pips=payload.get("tp_swing_pips", 0.0),
-            tp_fvg_pips=payload.get("tp_fvg_pips", 0.0),
-        )
-
         # 学習用特徴量サンプル保存（未ラベル）
         try:
             insert_training_sample(self._db_conn, {
@@ -467,7 +458,6 @@ class Orchestrator:
                 "hour_of_day": jst_now.hour,
                 "day_of_week": now.weekday(),
                 "session_type": get_session_flag(now),
-                "tp_distance_pips": _pre_tp,
                 "open_positions_count": len(self._position_manager.positions),
                 "max_dd_24h": 0.0,
                 "calendar_risk_score": calendar_risk_score,
@@ -489,7 +479,6 @@ class Orchestrator:
             calendar_risk_score=calendar_risk_score,
             session_type=get_session_flag(now),
             day_of_week=now.weekday(),
-            tp_distance_pips=_pre_tp,
         )
         prediction = self._predictor.predict(pair, features)
         if prediction is None:

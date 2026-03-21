@@ -108,11 +108,10 @@ def auto_tune_execution_noise(
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
         hm = _hold_minutes(row)
         hold_minutes.append(hm)
-        if hm <= 8 and reason in {"prob_decay", "time_decay", "trailing"}:
+        if hm <= 8 and reason in {"time_decay", "trailing"}:
             early_noise_count += 1
 
     avg_hold = sum(hold_minutes) / len(hold_minutes) if hold_minutes else 0.0
-    prob_decay_ratio = reason_counts.get("prob_decay", 0) / sample_count
     trailing_ratio = reason_counts.get("trailing", 0) / sample_count
     structural_tp_ratio = reason_counts.get("structural_tp", 0) / sample_count
     early_noise_ratio = early_noise_count / sample_count
@@ -128,7 +127,7 @@ def auto_tune_execution_noise(
         return max(low, min(v, high))
 
     # ノイズが多い週は保守側へ。
-    if early_noise_ratio >= 0.28 or (prob_decay_ratio >= 0.30 and avg_hold <= 20):
+    if early_noise_ratio >= 0.28:
         new["exit_prob_stale_minutes"] = _clamp(new["exit_prob_stale_minutes"] + 5, 10, 90)
         new["trailing_update_cooldown_seconds"] = _clamp(new["trailing_update_cooldown_seconds"] + 10, 10, 180)
         new["trailing_min_step_pips"] = _clamp(new["trailing_min_step_pips"] + 0.2, 0.5, 6.0)
@@ -146,7 +145,6 @@ def auto_tune_execution_noise(
             "sample_count": sample_count,
             "metrics": {
                 "avg_hold_minutes": round(avg_hold, 2),
-                "prob_decay_ratio": round(prob_decay_ratio, 3),
                 "trailing_ratio": round(trailing_ratio, 3),
                 "structural_tp_ratio": round(structural_tp_ratio, 3),
                 "early_noise_ratio": round(early_noise_ratio, 3),
@@ -176,7 +174,6 @@ def auto_tune_execution_noise(
         },
         "metrics": {
             "avg_hold_minutes": round(avg_hold, 2),
-            "prob_decay_ratio": round(prob_decay_ratio, 3),
             "trailing_ratio": round(trailing_ratio, 3),
             "structural_tp_ratio": round(structural_tp_ratio, 3),
             "early_noise_ratio": round(early_noise_ratio, 3),

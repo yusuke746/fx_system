@@ -167,7 +167,6 @@ def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
             float(row.get("sentiment_score", 0.0)),
             float(row.get("session_type", 0)),
             float(row.get("day_of_week", 0)),
-            float(row.get("tp_distance_pips", 0.0)),
         ])
         y.append(int(row["label"]))
 

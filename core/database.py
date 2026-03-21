@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS trades (
     tp_price    REAL,
     pnl_pips    REAL,
     pnl_jpy     REAL,
-    exit_reason TEXT,                   -- 'atr_sl'|'doten'|'time_exit'|'calendar_veto'|'trailing'|'prob_decay'|'time_decay'|'structural_tp'
+    exit_reason TEXT,                   -- 'atr_sl'|'doten'|'time_exit'|'calendar_veto'|'trailing'|'time_decay'|'structural_tp'
     mt5_ticket  INTEGER,
     created_at  TIMESTAMP DEFAULT (datetime('now'))  -- UTC
 );
@@ -394,7 +394,7 @@ def check_integrity(conn: sqlite3.Connection) -> bool:
 
 
 def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
-    """学習用サンプル（特徴量36個）を保存する。"""
+    """学習用サンプル（特徴量35個）を保存する。"""
     cur = _execute_with_retry(
         conn,
         """INSERT INTO training_samples (
@@ -411,7 +411,7 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
               sweep_pending_bars,
               open_positions_count, max_dd_24h, calendar_risk_score, sentiment_score,
               alert_mode, quality_gate_pass, vol_ok, in_session, is_friday_late,
-              session_type, tp_distance_pips
+              session_type
         ) VALUES (
            ?, ?, ?, ?, ?,
            ?, ?, ?,
@@ -426,7 +426,7 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
               ?,
               ?, ?, ?, ?,
               ?, ?, ?, ?, ?,
-              ?, ?
+              ?
         )""",
         (
             sample["pair"],
@@ -473,7 +473,6 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
             int(sample.get("in_session")) if sample.get("in_session") is not None else None,
             int(sample.get("is_friday_late")) if sample.get("is_friday_late") is not None else None,
             sample.get("session_type", 0),
-            sample.get("tp_distance_pips", 0.0),
         ),
     )
     _commit_with_retry(conn)
