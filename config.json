@@ -2,7 +2,6 @@
   "system": {
     "version": "2.2",
     "pairs": ["USDJPY", "EURUSD", "GBPJPY"],
-    "demo_mode": true
   },
   "llm": {
     "model_instant": "gpt-5.2",

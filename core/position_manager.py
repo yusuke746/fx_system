@@ -263,17 +263,33 @@ class PositionManager:
                 pos.trailing_high = current_price
                 new_sl = current_price - trail_dist
                 if new_sl > pos.sl_price + min_step_price:
-                    await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
-                    pos.sl_price = new_sl
-                    pos.last_trailing_update_utc = now_utc()
+                        ok = await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
+                        if ok:
+                            pos.sl_price = new_sl
+                            pos.last_trailing_update_utc = now_utc()
+                            logger.info(f"Trailing SL updated: {pos.pair} ticket={pos.ticket} new_sl={round(new_sl, 5)}")
+                        else:
+                            logger.error(f"Failed to update trailing SL: {pos.pair} ticket={pos.ticket}")
+                            await self._notifier.send(
+                                f"⚠️ Trailing SL更新失敗: {pos.pair} ticket={pos.ticket}",
+                                AlertLevel.WARNING,
+                            )
         else:
             if current_price < pos.trailing_low:
                 pos.trailing_low = current_price
                 new_sl = current_price + trail_dist
                 if new_sl < pos.sl_price - min_step_price:
-                    await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
-                    pos.sl_price = new_sl
-                    pos.last_trailing_update_utc = now_utc()
+                        ok = await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
+                        if ok:
+                            pos.sl_price = new_sl
+                            pos.last_trailing_update_utc = now_utc()
+                            logger.info(f"Trailing SL updated: {pos.pair} ticket={pos.ticket} new_sl={round(new_sl, 5)}")
+                        else:
+                            logger.error(f"Failed to update trailing SL: {pos.pair} ticket={pos.ticket}")
+                            await self._notifier.send(
+                                f"⚠️ Trailing SL更新失敗: {pos.pair} ticket={pos.ticket}",
+                                AlertLevel.WARNING,
+                            )
 
     async def _force_close(self, pos: ManagedPosition, reason: str, close_price: float | None = None) -> None:
         """強制クローズ実行。"""

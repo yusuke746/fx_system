@@ -43,7 +43,6 @@ class Settings(BaseSettings):
     log_dir: str = str(DEFAULT_LOG_DIR)
     model_dir: str = str(DEFAULT_MODEL_DIR)
     config_path: str = str(DEFAULT_CONFIG_PATH)
-    demo_mode: bool = True
 
     # Webhook
     webhook_secret: SecretStr = SecretStr("")

@@ -118,6 +118,9 @@ class Orchestrator:
         # リスク設定
         self._risk_config = load_risk_config(self._config)
 
+        # ← [NEW] LLMで使用するATR情報キャッシュ（webhook → diff_detection_task）
+        self._last_webhook_atrs: dict[str, tuple[float, float]] = {}  # pair -> (atr_14, atr_20d_avg)
+
         # スケジューラ
         self._scheduler = AsyncIOScheduler(timezone=UTC)
 
@@ -127,7 +130,6 @@ class Orchestrator:
     async def start(self) -> None:
         """システムを起動する。"""
         logger.info(f"=== FX Auto-Trading System v{self._config['system']['version']} ===")
-        logger.info(f"Demo mode: {self._config['system']['demo_mode']}")
         logger.info(f"Pairs: {self._config['system']['pairs']}")
         logger.info(f"Start time: {format_jst(now_utc())}")
 
@@ -177,7 +179,6 @@ class Orchestrator:
         await self._notifier.send(
             f"システム起動完了\n"
             f"バージョン: v{self._config['system']['version']}\n"
-            f"デモモード: {self._config['system']['demo_mode']}\n"
             f"対象ペア: {', '.join(self._config['system']['pairs'])}"
         )
 
@@ -334,9 +335,13 @@ class Orchestrator:
         pair = payload["pair"]
         direction = payload["direction"]
         atr = payload["atr"]
+        atr_20d_avg = payload.get("atr_20d_avg", 0.0)  # ← [NEW] webhook から20日平均ATRを取得
         close_price = payload["close"]
 
-        logger.info(f"Processing signal: {pair} {direction} ATR={atr}")
+        # ← [NEW] LLM diff_detection_task で使用するATR情報をキャッシュ
+        self._last_webhook_atrs[pair] = (atr, atr_20d_avg)
+
+        logger.info(f"Processing signal: {pair} {direction} ATR={atr} avg_atr_20d={atr_20d_avg}")
 
         # ② Calendar Veto（Layer A）
         veto_active, veto_reason = self._calendar_veto.is_veto_active(pair)
@@ -591,9 +596,6 @@ class Orchestrator:
                     self._broker.get_account_balance(),
                     sl_pips, pair, self._risk_config,
                 )
-                sl_price, tp_price = self._calc_sl_tp_price(
-                    pair, direction, close_price, sl_pips, tp_pips,
-                )
                 ok, new_ticket, sl_price, tp_price = await self._position_manager.execute_doten(
                     pair, pos.ticket, direction,
                     lot, sl_pips, tp_pips, close_price,
@@ -778,10 +780,13 @@ class Orchestrator:
                     f"mode={'low_power' if detector.is_low_power else 'normal'}"
                 )
 
+                # ← [NEW] webhook キャッシュから ATR情報を取得
+                current_atr, avg_atr_20d = self._last_webhook_atrs.get(pair, (0.0, 0.0))
+
                 should_call, reason = detector.run_diff_check(
                     news_articles=news_articles,
-                    current_atr=0.0,   # MT5からリアルタイム取得時に結合
-                    avg_atr_20d=0.0,
+                    current_atr=current_atr,   # ← [FIXED] webhook から取得した値を使用
+                    avg_atr_20d=avg_atr_20d,
                     calendar_veto_active=veto_active,
                 )
 

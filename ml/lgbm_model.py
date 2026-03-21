@@ -120,28 +120,32 @@ class PredictionResult:
     ) -> bool:
         """
         ペアのモデル精度に応じて閾値を動的調整する。
-
-        精度が高い（>=0.45）: 厳しめフィルター
-        精度が中程度（>=0.40）: 現行の設定
-        精度が低い（<0.40）:  緩めフィルター
+        
+        ロジック: signal_direction と一致する確率が十分に高く、
+                かつ逆方向の確率が十分に低い場合のみシグナルを通す。
+        
+        精度が高い（>=0.45）: 厳しめフィルター（高精度モデルを信頼）
+        精度が中程度（>=0.40）: 中程度フィルター
+        精度が低い（<0.40）:  緩めフィルター（Pineシグナルを尊重）
         """
         if model_accuracy >= 0.45:
-            # 精度高: モデルを信頼してより厳しくフィルター
-            direction_threshold = 0.40
-            block_threshold = 0.55
+            # 精度高: 両方の条件を厳しく
+            direction_threshold = 0.45
+            block_threshold = 0.35
         elif model_accuracy >= 0.40:
-            # 精度中: 現行の設定
-            direction_threshold = 0.35
-            block_threshold = 0.60
+            # 精度中: 中程度の厳しさ
+            direction_threshold = 0.40
+            block_threshold = 0.45
         else:
             # 精度低（USDJPY相当）: Pineシグナルを最大限尊重
-            direction_threshold = 0.30
-            block_threshold = 0.65
+            direction_threshold = 0.35
+            block_threshold = 0.50
 
+        # AND 条件: direction確率が高い かつ 逆方向確率が低い
         if signal_direction == "long":
-            return self.prob_up >= direction_threshold or self.prob_down < block_threshold
+            return self.prob_up >= direction_threshold and self.prob_down < block_threshold
         else:
-            return self.prob_down >= direction_threshold or self.prob_up < block_threshold
+            return self.prob_down >= direction_threshold and self.prob_up < block_threshold
 
     @property
     def is_reverse_signal(self) -> bool:
