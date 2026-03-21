@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from core.time_manager import get_session_flag
+
 
 FEATURE_COLS = [
     "CSV_fvg_4h_zone_active",
@@ -178,6 +180,18 @@ def _find_time_col(df: pd.DataFrame) -> str:
     return ""
 
 
+def _session_flag_from_timestamp(ts: pd.Timestamp) -> int:
+    if pd.isna(ts):
+        return 0
+    return get_session_flag(ts.to_pydatetime())
+
+
+def _day_of_week_from_timestamp(ts: pd.Timestamp) -> int:
+    if pd.isna(ts):
+        return 0
+    return int(ts.weekday())
+
+
 def build_dataset(input_path: Path, output_path: Path, pair: str, horizon_bars: int) -> pd.DataFrame:
     df = pd.read_csv(input_path)
 
@@ -229,8 +243,8 @@ def build_dataset(input_path: Path, output_path: Path, pair: str, horizon_bars: 
 
     signal_df["pair"] = pair
     signal_df["direction"] = signal_df["CSV_direction"].map({1.0: "long", 2.0: "short"})
-    signal_df["session_type"] = 0    # CSVには時刻なし → 0固定
-    signal_df["day_of_week"] = 0     # 同上 → 0固定
+    signal_df["session_type"] = signal_df["signal_time"].apply(_session_flag_from_timestamp)
+    signal_df["day_of_week"] = signal_df["signal_time"].apply(_day_of_week_from_timestamp)
 
     model_df = signal_df[["pair", "signal_time", "direction", "CSV_close_price", *FEATURE_COLS, "future_close_price", "future_return_pips", "session_type", "day_of_week", "label"]].copy()
     model_df = model_df.rename(columns=RENAME_TO_MODEL | {"CSV_close_price": "close_price"})

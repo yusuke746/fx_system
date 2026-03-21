@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from ml.lgbm_model import FEATURE_NAMES
-from ml.trainer import train_model, walk_forward_validate
+from ml.trainer import save_model_metrics, train_model, walk_forward_validate
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,12 +73,26 @@ def main() -> None:
     if len(X) < args.min_samples:
         raise ValueError(f"insufficient_samples({len(X)}<{args.min_samples})")
 
+    val = None
     if not args.skip_wfv:
         val = walk_forward_validate(X, y, signal_times=signal_times)
         print(f"walk_forward_accuracy={val.get('accuracy', 0.0):.4f}")
+        print(f"walk_forward_balanced_accuracy={val.get('balanced_accuracy', 0.0):.4f}")
+        print(f"walk_forward_majority_baseline={val.get('majority_baseline', 0.0):.4f}")
         print(f"walk_forward_folds={val.get('n_folds', len(val.get('fold_results', [])))}")
 
     train_model(X, y, pair=args.pair, model_dir=args.model_dir)
+    save_model_metrics(
+        pair=args.pair,
+        model_dir=args.model_dir,
+        metrics={
+            "accuracy": float(val.get("accuracy", 0.0)) if val else 0.0,
+            "balanced_accuracy": float(val.get("balanced_accuracy", 0.0)) if val else 0.0,
+            "majority_baseline": float(val.get("majority_baseline", 0.0)) if val else 0.0,
+            "samples": int(len(X)),
+            "source": "bootstrap_csv",
+        },
+    )
 
     cls_counts = {
         "up": int(np.sum(y == 0)),

@@ -1,0 +1,9 @@
+{
+  "pair": "USDJPY",
+  "updated_at_utc": "2026-03-21T08:20:39.294805+00:00",
+  "accuracy": 0.40039003086136316,
+  "balanced_accuracy": 0.3686409136822243,
+  "majority_baseline": 0.4815956695823369,
+  "samples": 3141,
+  "source": "bootstrap_csv"
+}

@@ -1,0 +1,9 @@
+{
+  "pair": "EURUSD",
+  "updated_at_utc": "2026-03-21T08:20:44.080217+00:00",
+  "accuracy": 0.4826977356856287,
+  "balanced_accuracy": 0.4016787918664931,
+  "majority_baseline": 0.5106247298817558,
+  "samples": 2918,
+  "source": "bootstrap_csv"
+}

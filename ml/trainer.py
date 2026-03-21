@@ -13,16 +13,38 @@ LightGBM 学習・ウォークフォワード検証モジュール
   - 学習ログ: 保存基準（UTC）
 """
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
 from loguru import logger
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import balanced_accuracy_score
 
 from core.time_manager import now_utc
 from ml.lgbm_model import LGBM_PARAMS, FEATURE_NAMES
+
+
+def save_model_metrics(pair: str, model_dir: str, metrics: dict) -> Path:
+    """モデル精度メタデータを保存する。"""
+    save_dir = Path(model_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = save_dir / f"lgbm_{pair}_metrics.json"
+    payload = {"pair": pair, "updated_at_utc": now_utc().isoformat(), **metrics}
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=True, indent=2)
+    logger.info(f"Model metrics saved: {metrics_path}")
+    return metrics_path
+
+
+def load_model_metrics(pair: str, model_dir: str = "models") -> dict | None:
+    """モデル精度メタデータを読み込む。"""
+    metrics_path = Path(model_dir) / f"lgbm_{pair}_metrics.json"
+    if not metrics_path.exists():
+        return None
+    with open(metrics_path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def train_model(
@@ -35,7 +57,7 @@ def train_model(
     ウォークフォワード検証付きで LightGBM モデルを学習する。
 
     Args:
-        X: shape=(N, 32) の特徴量配列
+        X: shape=(N, 35) の特徴量配列
         y: shape=(N,) のラベル配列 (0=up, 1=flat, 2=down)
         pair: 通貨ペア名
         model_dir: モデル保存ディレクトリ
@@ -45,7 +67,7 @@ def train_model(
     """
     logger.info(f"Training LightGBM for {pair}: {X.shape[0]} samples, {X.shape[1]} features")
 
-    model = lgb.LGBMClassifier(**LGBM_PARAMS)
+    model = lgb.LGBMClassifier(**LGBM_PARAMS, class_weight="balanced")
     model.fit(
         X, y,
         feature_name=FEATURE_NAMES,
@@ -120,16 +142,21 @@ def walk_forward_validate(
                 fold += 1
                 continue
 
-            model = lgb.LGBMClassifier(**LGBM_PARAMS)
+            model = lgb.LGBMClassifier(**LGBM_PARAMS, class_weight="balanced")
             model.fit(X_train, y_train, feature_name=FEATURE_NAMES)
             y_pred = model.predict(X_val)
             accuracy = float(np.mean(y_pred == y_val))
+            balanced_accuracy = float(balanced_accuracy_score(y_val, y_pred))
+            class_counts = np.bincount(y_val, minlength=3)
+            majority_baseline = float(class_counts.max() / len(y_val))
 
             fold_results.append({
                 "fold": fold,
                 "train_samples": len(X_train),
                 "val_samples": len(X_val),
                 "accuracy": accuracy,
+                "balanced_accuracy": balanced_accuracy,
+                "majority_baseline": majority_baseline,
             })
             fold += 1
 
@@ -146,12 +173,18 @@ def walk_forward_validate(
             }
 
         avg_accuracy = float(np.mean([r["accuracy"] for r in fold_results]))
+        avg_balanced_accuracy = float(np.mean([r["balanced_accuracy"] for r in fold_results]))
+        avg_majority_baseline = float(np.mean([r["majority_baseline"] for r in fold_results]))
         logger.info(
             f"Walk-forward validation (date-based): {len(fold_results)} folds, "
-            f"avg accuracy={avg_accuracy:.4f}"
+            f"avg accuracy={avg_accuracy:.4f}, "
+            f"avg balanced_accuracy={avg_balanced_accuracy:.4f}, "
+            f"avg majority_baseline={avg_majority_baseline:.4f}"
         )
         return {
             "accuracy": avg_accuracy,
+            "balanced_accuracy": avg_balanced_accuracy,
+            "majority_baseline": avg_majority_baseline,
             "fold_results": fold_results,
             "n_folds": len(fold_results),
             "date_based": True,
@@ -173,31 +206,42 @@ def walk_forward_validate(
         X_train, y_train = X[start:train_end], y[start:train_end]
         X_val, y_val = X[train_end:val_end], y[train_end:val_end]
 
-        model = lgb.LGBMClassifier(**LGBM_PARAMS)
+        model = lgb.LGBMClassifier(**LGBM_PARAMS, class_weight="balanced")
         model.fit(X_train, y_train, feature_name=FEATURE_NAMES)
 
         y_pred = model.predict(X_val)
         accuracy = float(np.mean(y_pred == y_val))
+        balanced_accuracy = float(balanced_accuracy_score(y_val, y_pred))
+        class_counts = np.bincount(y_val, minlength=3)
+        majority_baseline = float(class_counts.max() / len(y_val))
 
         fold_results.append({
             "fold": fold,
             "train_samples": len(X_train),
             "val_samples": len(X_val),
             "accuracy": accuracy,
+            "balanced_accuracy": balanced_accuracy,
+            "majority_baseline": majority_baseline,
         })
 
         start += val_size
         fold += 1
 
     avg_accuracy = float(np.mean([r["accuracy"] for r in fold_results])) if fold_results else 0.0
+    avg_balanced_accuracy = float(np.mean([r["balanced_accuracy"] for r in fold_results])) if fold_results else 0.0
+    avg_majority_baseline = float(np.mean([r["majority_baseline"] for r in fold_results])) if fold_results else 0.0
 
     logger.info(
         f"Walk-forward validation: {len(fold_results)} folds, "
-        f"avg accuracy={avg_accuracy:.4f}"
+        f"avg accuracy={avg_accuracy:.4f}, "
+        f"avg balanced_accuracy={avg_balanced_accuracy:.4f}, "
+        f"avg majority_baseline={avg_majority_baseline:.4f}"
     )
 
     return {
         "accuracy": avg_accuracy,
+        "balanced_accuracy": avg_balanced_accuracy,
+        "majority_baseline": avg_majority_baseline,
         "fold_results": fold_results,
         "n_folds": len(fold_results),
         "date_based": False,

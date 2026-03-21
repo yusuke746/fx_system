@@ -91,17 +91,23 @@ GOLD追加見送り理由:
 | 4時間足（方向）      | Fair Value Gap     | 4Hレベルのインバランス              | 4H FVGゾーンを記録。15M終値がゾーン内なら `fvg_4h_flag=1`                       |
 | 1時間足（壁・Sweep） | Liquidity Sweep    | 機関投資家の個人SL狩りを検出        | 1H直近高値/安値を1H足で突破→反転を検出。直近5本以内なら `liq_1h_flag=1`        |
 | 1時間足（構造）      | BOS                | 1H相場の構造転換を確認              | 1H swing high/lowのブレイクで `bos_1h_flag=1`                                   |
-| 15分足（実行）       | エントリートリガー | 上記MTF条件が揃った時のみエントリー | `mtf_confluence >= 2` かつ MACDクロス or RSI反転ゾーンでWebhook発火             |
+| 15分足（実行）       | エントリートリガー | SMC/モメンタム特徴量をWebhook送信   | 推奨は `i_alert_mode=ml_first`。Pineは広めにトリガーし、最終通過判定はLightGBMで行う |
 
 ### 2.2 アラート発火条件（確定版）
 
-Pine Script発火条件（**全て同時成立が必要**）:
+現行実装では、Pine は「最終エントリー判定器」ではなく「特徴量付きトリガー送信器」です。
 
-- **【必須1】上位TFトレンド:** 4H EMA20 vs EMA50 の方向
-- **【必須2】MTF合致スコア:** `mtf_confluence >= 2`（4H OB/FVG + 1H Sweep/BOSのうち2つ以上）
-- **【必須3】ボラティリティ:** `ATR(14) > 20日平均ATRの0.8倍` かつ BBスクイーズ中でない
-- **【必須4】時間フィルター:** ロンドン・NY・重複セッション中 / 深夜00:00〜07:00 JST除外
-- **【推奨】モメンタム:** MACDヒストグラムゼロクロス or RSI(14) が30〜35 or 65〜70ゾーン
+- 推奨モードは `ml_first`
+- Pine 側では MTF SMC・ボラティリティ・モメンタム情報を広めに送る
+- Python 側で Calendar Veto / LLM差分検知 / LightGBM / リスク管理を通して最終判定する
+- `strict` は比較・検証用に残すが、本番推奨ではない
+
+現行の実装意図:
+
+- **上位足整合:** 4H / 1H / 15M の SMC 情報を数値特徴量として送る
+- **ボラティリティ:** `atr` と `atr_20d_avg` を送信し、Python 側の ATR 急変判定にも使う
+- **時間フィルター:** 深夜帯除外やセッション情報は Pine / Python の両方で補助的に扱う
+- **最終通過条件:** `PredictionResult.is_strong_signal()` で「順方向確率が十分高い」かつ「逆方向確率が十分低い」場合のみ通す
 
 **発火時Webhookに含めるSMCデータ:**
 
@@ -112,9 +118,14 @@ Pine Script発火条件（**全て同時成立が必要**）:
   "fvg_4h_zone_active": true,
   "ob_4h_zone_active": false,
   "liq_sweep_1h": true,
+  "liq_sweep_qualified": true,
   "bos_1h": false,
+  "choch_1h": true,
+  "msb_15m_confirmed": true,
   "mtf_confluence": 2,
   "atr": 0.45,
+  "atr_20d_avg": 0.31,
+  "ob_4h_distance_pips": 18.4,
   "close": 149.85
 }
 ```
@@ -207,22 +218,27 @@ SL_TP_MAX_PIPS = 35
 
 ### 4.2 35特徴量リスト（MTF SMC版）
 
-**SMCフラグ（5個）:**
+**SMCフラグ（8個）:**
 
 - `fvg_4h_zone_active` — 4H FVGゾーン内かどうか
 - `ob_4h_zone_active` — 4H OBゾーン内かどうか
 - `liq_sweep_1h` — 1H Liquidity Sweepの有無
+- `liq_sweep_qualified` — Sweep品質条件を満たしたか
 - `bos_1h` — 1H BOSの有無
+- `choch_1h` — 1H CHOCH の有無
+- `msb_15m_confirmed` — 15M の micro structure break 確認
 - `mtf_confluence` — MTF合致スコア（0〜4）
 
-**価格・ボラティリティ系（10個）:**
+**価格・ボラティリティ系（5個）:**
 
-- `atr_14` — ATR(14)の現在値
 - `atr_ratio` — 現在ATR / 20日平均ATR
 - `bb_width` — ボリンジャーバンド幅（スクイーズ検知用）
 - `close_vs_ema20_4h` — 4H EMA20との乖離率
 - `close_vs_ema50_4h` — 4H EMA50との乖離率
 - `high_low_range_15m` — 直近15M足の高安レンジ
+
+**トレンド・モメンタム補助（3個）:**
+
 - `trend_direction` — 上位足トレンド方向（-1/0/1）
 - `momentum_long` — ロング方向モメンタムの強さ
 - `momentum_short` — ショート方向モメンタムの強さ
@@ -244,7 +260,7 @@ SL_TP_MAX_PIPS = 35
 - `liq_sweep_strength` — Sweepの強さ（突破幅/ATR）
 - `prior_candle_body_ratio` — 直前ローソク足の実体比率
 - `consecutive_same_dir` — 同方向ローソク足の連続本数
-- `pivot_proximity` — 直近ピボットポイントまでの距離（pips）
+- `sweep_pending_bars` — Sweep 発生からの経過バー数
 
 **リスク・ポジション系（4個）:**
 
@@ -252,6 +268,11 @@ SL_TP_MAX_PIPS = 35
 - `max_dd_24h` — 直近24時間の最大DD（%）
 - `calendar_risk_score` — 経済指標リスクスコア（0=安全/1=注意/2=高危険）
 - `sentiment_score` — GPT-5.2出力のセンチメントスコア（-1.0〜1.0）
+
+**セッション補助（2個）:**
+
+- `session_type` — 0=other, 1=london, 2=ny, 3=overlap
+- `day_of_week` — 0=月, ..., 6=日
 
 ### 4.3 学習・検証設計
 
@@ -263,6 +284,13 @@ SL_TP_MAX_PIPS = 35
 モデル管理: 通貨ペアごとに独立モデル（3モデル）
 保存世代数: 3世代（月次クリーンアップ）
 ```
+
+現行実装の補足:
+
+- 学習時は `class_weight="balanced"` を使用
+- 週次再学習とブートストラップ学習の両方で `accuracy` に加えて `balanced_accuracy` と `majority_baseline` を保存
+- `models/lgbm_<PAIR>_metrics.json` を起動時に読み込み、ペア別の初期 `model_accuracy` に反映
+- TradingView CSV 由来モデルはブートストラップ用途であり、本命は `training_samples` ベースの週次再学習
 
 ---
 
@@ -475,7 +503,7 @@ STEP 4: 変更時のみ config.json に反映
 | **Phase 1** | Week 1〜2   | ① KIWA極デモ口座 + MT5（VPS）起動確認 ② Pine Script MTF SMC ③ Webhook受信（FastAPI）+ 署名検証 ④ MT5発注テスト                                              | MT5手動発注OK / Webhook署名検証OK / 4H FVGゾーン正常表示            |
 | **Phase 2** | Week 3〜4   | ① GPT-5.2差分検知タスク ② Veto 2層 ③ 経済指標カレンダーAPI連携 ④ api_call_log                                                                               | 1日の呼び出し回数10〜25回 / FOMC前後でVeto A自動発動                |
 | **Phase 3** | Week 5、7   | ① 35特徴量エンジニアリング ② LightGBM学習（3ペア独立）③ ウォークフォワード検証 ④ ATR動的SL/TP ⑤ バックテスト                                               | WF検証: 平均Sharpe比>1.0 / 最大DD<15% / SMC特徴量が重要度上位       |
-| **Phase 4** | Week 8〜9   | ① ドテン高速連続発注 + インターバル制限 ② スケールアウト ③ 相関リスク管理 ④**フォールバック全パターン実装（付録D参照）** ⑤ DBスキーマ + 全自動メンテ | ドテン動作確認 / インターバル誤動作なし / 1週間の自動メンテ正常動作 |
+| **Phase 4** | Week 8〜9   | ① ドテン高速連続発注 + インターバル制限 ② 動的エグジット運用安定化（time decay / structural TP / trailing） ③ 相関リスク管理 ④**フォールバック全パターン実装（付録D参照）** ⑤ DBスキーマ + 全自動メンテ | ドテン動作確認 / インターバル誤動作なし / 1週間の自動メンテ正常動作 |
 | **Phase 5** | Week 10〜13 | ① デモ口座1ヶ月フル稼働 ② GPT-5.2コスト週次記録 ③ 週末最適化収束確認 ④ Discord監視・週次レポート                                                            | 勝率>50% / 最大DD<10% / 週末最適化が3週間安定収束                   |
 | **Phase 6** | Week 14〜   | ① 本番口座移行（最小ロット0.01から）② 本番スプレッドで再バックテスト ③ 週次レビュー定例化                                                                    | 3ヶ月デモと同等 / 月次純損益（APIコスト差引後）がプラス             |
 
@@ -518,28 +546,27 @@ STEP 4: 変更時のみ config.json に反映
 {
   "system": {
     "version": "2.2",
-    "pairs": ["USDJPY", "EURUSD", "GBPJPY"],
-    "demo_mode": true
+    "pairs": ["USDJPY", "EURUSD", "GBPJPY"]
   },
-    "llm": {
-        "model_instant": "gpt-5.2",
-        "model_diff": "gpt-5-nano",
-        "model_thinking": "gpt-5.2",
-        "reasoning_effort_instant": "low",
-        "reasoning_effort_diff": "low",
-        "reasoning_effort_thinking": "medium",
-        "hybrid_enabled": true,
-        "news_importance_escalation_threshold": 0.65,
-        "feature_news_importance_threshold": 0.55,
-        "web_search_enabled": true,
-        "web_search_tool_type": "web_search_preview",
-        "web_search_context_size": "low",
-        "llm_enabled": true,
-        "atr_threshold_multiplier": 1.5,
-        "cache_ttl_normal_minutes": 60,
-        "cache_ttl_low_power_minutes": 90,
-        "low_power_consecutive_skips": 3
-    },
+  "llm": {
+    "model_instant": "gpt-5.2",
+    "model_diff": "gpt-5-nano",
+    "model_thinking": "gpt-5.2",
+    "reasoning_effort_instant": "low",
+    "reasoning_effort_diff": "low",
+    "reasoning_effort_thinking": "medium",
+    "hybrid_enabled": true,
+    "news_importance_escalation_threshold": 0.65,
+    "feature_news_importance_threshold": 0.55,
+    "web_search_enabled": true,
+    "web_search_tool_type": "web_search_preview",
+    "web_search_context_size": "low",
+    "llm_enabled": true,
+    "atr_threshold_multiplier": 1.5,
+    "cache_ttl_normal_minutes": 60,
+    "cache_ttl_low_power_minutes": 90,
+    "low_power_consecutive_skips": 3
+  },
   "risk": {
     "max_risk_per_trade_pct": 2.0,
     "max_daily_drawdown_pct": 10.0,
@@ -550,14 +577,19 @@ STEP 4: 変更時のみ config.json に反映
     "sl_multiplier": 1.5,
     "sl_min_pips": 15,
     "sl_max_pips": 35,
-    "exit_prob_threshold": 0.35,
     "time_decay_minutes": 60,
     "time_decay_min_profit_atr": 0.5,
     "trailing_atr_multiplier": 0.8,
-    "exit_prob_stale_minutes": 30,
     "trailing_update_cooldown_seconds": 30,
     "trailing_min_step_pips": 2.0,
     "doten_interval_seconds": 3600
+  },
+  "ml": {
+    "label_horizon_minutes": 240,
+    "min_samples_per_pair": 300,
+    "min_directional_samples": 30,
+    "min_cv_accuracy": 0.40,
+    "lookback_days": 90
   },
   "optimization": {
     "auto_optimize": true,
@@ -573,6 +605,11 @@ STEP 4: 変更時のみ config.json に反映
   }
 }
 ```
+
+補足:
+
+- `demo_mode` は現行実装では廃止
+- 一部の補助キーは `config/settings.py` の `_normalize_trading_config()` で既定値補完される
 
 ### D. フォールバック設計（Phase 4実装必須）
 
@@ -602,7 +639,7 @@ STEP 4: 変更時のみ config.json に反映
 
 | シナリオ                            | 検知方法                     | フォールバック動作                                                                                    | 復旧条件                                       |
 | ----------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| モデルファイル読み込みエラー        | `joblib.load()` 例外       | 当該ペアの新規エントリーを全停止。Discord緊急通知。既存ポジション管理（SL/TP・スケールアウト）は継続  | 手動でモデルファイルを復元後に再起動           |
+| モデルファイル読み込みエラー        | `joblib.load()` 例外       | 当該ペアの新規エントリーを全停止。Discord緊急通知。既存ポジション管理（SL/TP・time decay・trailing）は継続  | 手動でモデルファイルを復元後に再起動           |
 | 推論中の例外（NaN・次元不一致）     | 推論関数内のtry-catch        | シグナルを破棄（エントリー禁止）。Discord通知（エラー内容付き）。次の15分足で特徴量を再計算して再試行 | 次回推論成功で自動復旧                         |
 | ドリフト検知（勝率<40% or PSI>0.2） | 毎分の監視タスク             | 緊急再学習をトリガー。再学習中も旧モデルで推論継続（安全側）                                          | 再学習完了後に新モデルへ切り替え + Discord通知 |
 | 週次再学習失敗                      | 再学習スクリプトの終了コード | 旧モデルで稼働継続。Discord通知。翌週日曜23:00に再試行                                                | 翌週再学習成功で自動復旧                       |
@@ -757,7 +794,8 @@ DB_BACKUP_PATH=C:/fx_system/db/backup/
 LOG_DIR=C:/fx_system/logs/
 MODEL_DIR=C:/fx_system/models/
 CONFIG_PATH=C:/fx_system/config.json
-DEMO_MODE=true
+WEBHOOK_SECRET=your_shared_webhook_token_here
+WEBHOOK_PORT=8000
 ```
 
 #### G.2 .gitignore 設定（必須）
@@ -806,7 +844,8 @@ DB_BACKUP_PATH=C:/fx_system/db/backup/
 LOG_DIR=C:/fx_system/logs/
 MODEL_DIR=C:/fx_system/models/
 CONFIG_PATH=C:/fx_system/config.json
-DEMO_MODE=true
+WEBHOOK_SECRET=your_shared_webhook_token_here
+WEBHOOK_PORT=8000
 ```
 
 #### G.4 Python での読み込み
@@ -830,18 +869,19 @@ class Settings(BaseSettings):
     mt5_server: str
 
     # DB
-    db_path: str
-    db_backup_path: str
+    db_path: str = "./db/trading.db"
+    db_backup_path: str = "./db/backup/"
 
     # System
-    log_dir: str
-    model_dir: str
-    config_path: str
-    demo_mode: bool = True
+    log_dir: str = "./logs/"
+    model_dir: str = "./models/"
+    config_path: str = "./config.json"
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    # Webhook
+    webhook_secret: SecretStr = SecretStr("")
+    webhook_port: int = 8000
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 # 使用例
 settings = Settings()

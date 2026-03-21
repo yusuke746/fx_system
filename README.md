@@ -104,11 +104,14 @@ python main.py
 - Pineの `i_alert_mode` は `ml_first` を推奨（Pineはトリガー/特徴量送信、最終判断はLightGBM）。
 - エグジット戦略は固定ATRスケールアウトではなく、`time_decay` / `structural_tp` / trailing の優先順位で動作します。
 - Pine Script は `pinescript/mtf_smc_v2_3.pine` を使用し、`ob_4h_distance_pips` を JSON 送信して構造TPに利用します。
+- Pine Webhook は `atr` に加えて `atr_20d_avg` も送信し、LLM差分検知の ATR 急変判定で実値を使います。
 - `weekend_optimizer.py` は旧 scale-out 前提のため、グリッド探索の自動適用は安全停止しています（実行時は DB に記録のみ）。
 - 代わりに週次メンテ後に execution layer 向けの軽量チューニング（`exit_prob_stale_minutes` / `trailing_update_cooldown_seconds` / `trailing_min_step_pips`）を自動調整します。
 - 定期ニュース差分判定の LLM はペア別キャッシュで管理され、`config.json` の `llm.model_diff` で軽量モデルに切り替えできます。
 - ハイブリッドLLM: 通常は `llm.model_diff`（既定: `gpt-5-nano`）で低コスト判定し、`news_importance_escalation_threshold` を超える重要ニュース時のみ `llm.model_instant`（既定: `gpt-5.2`）へ昇格して精査します。
 - 特徴量反映は `feature_news_importance_threshold` 以上のニュース時のみ `sentiment_score` を有効化し、重要度が低い場合はノイズ混入を避けるため 0 として扱います。
+- 週次再学習とブートストラップ学習の両方で `models/lgbm_<PAIR>_metrics.json` を保存し、再起動時はこの精度メタデータを優先して読み込みます。
+- TradingView CSV から作る初期モデルは疎通・初期運用向けです。本命は `training_samples` 蓄積後の週次自動再学習です。
 
 ### アラートモード比較（ml_first vs strict）
 
@@ -206,6 +209,30 @@ python maintenance/run_bootstrap_batch.py \
 - `label IS NOT NULL` の学習済みサンプルは **180日保持**
 - 180日超の学習済みサンプルは週次メンテで自動削除
 
+### training_samples の蓄積確認
+
+本番投入後は、まず `training_samples` が想定どおり増えているかを確認します。
+
+```bash
+python maintenance/check_training_samples.py
+python maintenance/check_training_samples.py --hours 24 --limit 5
+python maintenance/check_training_samples.py --pair USDJPY --json
+```
+
+見るべき点:
+
+- `summary.total` が増加していること
+- `recent_last_<hours>h` に直近流入件数が出ていること
+- `per_pair` の `latest_signal_time` が更新されていること
+- 日曜23:00 JST 以降は `unlabeled` が減り、`labeled` が増え始めること
+
+### モデル精度メタデータ
+
+- 保存先: `models/lgbm_USDJPY_metrics.json`, `models/lgbm_EURUSD_metrics.json`, `models/lgbm_GBPJPY_metrics.json`
+- 主な項目: `accuracy`, `balanced_accuracy`, `majority_baseline`, `updated_at_utc`
+- 起動時はこのファイルを読んでペア別 `model_accuracy` の初期値に使います
+- `balanced_accuracy < majority_baseline` の状態は、まだモデル優位性が弱い目安です
+
 ## PineScript の使い方
 
 1. `pinescript/mtf_smc_v2_3.pine` の内容をコピー
@@ -217,4 +244,45 @@ python maintenance/run_bootstrap_batch.py \
 6. `i_webhook_token` に `.env` の `WEBHOOK_SECRET` と同じ値を設定
 7. `i_alert_mode` は **`ml_first`（推奨）** を選択（Pine側の過剰ゲートを避け、LightGBM中心で判定）
 8. 通貨ペアごとに `i_pair` パラメータを変更して3つのアラートを設定
+
+## プレローンチチェックリスト
+
+明日の常時稼働前に、最低限ここまでは確認してください。
+
+### 1. 設定と接続
+
+- `.env` に OpenAI / Discord / MT5 / Webhook の必須値が入っている
+- `config.json` が正しい JSON で、`system.pairs` と `ml` セクションが期待どおり
+- MT5 ターミナルに対象口座でログイン済み
+
+### 2. モデルとファイル
+
+- `models/lgbm_<PAIR>.pkl` が 3ペア分存在する
+- `models/lgbm_<PAIR>_metrics.json` が 3ペア分存在する
+- 疎通用モデルしかない段階であることを理解し、過信しない
+
+### 3. Webhook 動線
+
+- TradingView 側の Webhook URL が VPS に到達する
+- Pine の `i_webhook_token` と `.env` の `WEBHOOK_SECRET` が一致する
+- `i_alert_mode=ml_first` で3ペア分のアラートが有効
+
+### 4. 起動直後の監視
+
+- `python main.py` 起動後に例外で即落ちしない
+- Discord 通知が正常に届く
+- 初回シグナル受信後、`signals` と `training_samples` が増える
+- `python maintenance/check_training_samples.py --hours 1` で増分確認できる
+
+### 5. 週次再学習の前提
+
+- 日曜23:00 JST までに各ペアで十分な `training_samples` を蓄積できる見込みがある
+- MT5 から M15 履歴を取れる
+- 初回数週は `balanced_accuracy` と `majority_baseline` を毎週比較する
+
+### 6. リスク面の前提
+
+- いきなり実弾フルサイズで始めない
+- 明日開始時点では「モデル改善フェーズ」であり、「完成モデル運用」ではないと認識する
+- 異常時は Webhook 停止か MT5 側で手動停止できる体制を用意する
 

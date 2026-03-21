@@ -87,6 +87,7 @@ def _ensure_schema_compat(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "training_samples", "in_session", "INTEGER")
     _ensure_column(conn, "training_samples", "is_friday_late", "INTEGER")
     _ensure_column(conn, "training_samples", "session_type", "INTEGER")
+    _ensure_column(conn, "training_samples", "day_of_week", "INTEGER")
     _ensure_column(conn, "training_samples", "tp_distance_pips", "REAL")
 
 
@@ -216,6 +217,7 @@ CREATE TABLE IF NOT EXISTS training_samples (
     in_session               INTEGER,
     is_friday_late           INTEGER,
     session_type             INTEGER DEFAULT 0,
+    day_of_week              INTEGER DEFAULT 0,
     tp_distance_pips         REAL DEFAULT 0.0,
     label                    INTEGER,            -- 0=up, 1=flat, 2=down
     future_close_price       REAL,
@@ -411,7 +413,7 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
               sweep_pending_bars,
               open_positions_count, max_dd_24h, calendar_risk_score, sentiment_score,
               alert_mode, quality_gate_pass, vol_ok, in_session, is_friday_late,
-              session_type
+              session_type, day_of_week
         ) VALUES (
            ?, ?, ?, ?, ?,
            ?, ?, ?,
@@ -426,7 +428,7 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
               ?,
               ?, ?, ?, ?,
               ?, ?, ?, ?, ?,
-              ?
+              ?, ?
         )""",
         (
             sample["pair"],
@@ -473,6 +475,7 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
             int(sample.get("in_session")) if sample.get("in_session") is not None else None,
             int(sample.get("is_friday_late")) if sample.get("is_friday_late") is not None else None,
             sample.get("session_type", 0),
+            sample.get("day_of_week", 0),
         ),
     )
     _commit_with_retry(conn)

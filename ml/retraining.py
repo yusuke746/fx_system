@@ -21,7 +21,7 @@ from core.database import (
 )
 from core.time_manager import now_utc, utc_to_mt5_server
 from ml.lgbm_model import FEATURE_NAMES
-from ml.trainer import train_model, walk_forward_validate
+from ml.trainer import save_model_metrics, train_model, walk_forward_validate
 
 
 def _to_datetime_utc(iso_str: str) -> datetime:
@@ -238,6 +238,17 @@ def retrain_models_from_db(
             )
 
         train_model(X, y, pair=pair, model_dir=model_dir)
+        save_model_metrics(
+            pair=pair,
+            model_dir=model_dir,
+            metrics={
+                "accuracy": float(val.get("accuracy", 0.0)),
+                "balanced_accuracy": float(val.get("balanced_accuracy", 0.0)),
+                "majority_baseline": float(val.get("majority_baseline", 0.0)),
+                "samples": len(rows),
+                "source": "weekly_retraining",
+            },
+        )
 
         result["trained_pairs"].append(pair)
         result["validation"][pair] = val

@@ -66,6 +66,7 @@ from core.time_manager import (
 from broker.mt5_broker import MT5Broker
 from llm.llm_client import DiffDetector, LLMClient
 from ml.lgbm_model import LGBMPredictor, build_features
+from ml.trainer import load_model_metrics
 from veto.calendar_veto import CalendarVeto
 from webhook.server import app as fastapi_app
 from webhook.signal_queue import get_queue
@@ -159,14 +160,16 @@ class Orchestrator:
             if not ok:
                 logger.warning(f"Model not loaded for {pair} — predictions unavailable")
 
-        # WFV精度をモデルに設定（ブートストラップ時の既知値）
+        # WFV精度をモデルに設定（metricsファイル優先、なければ既定値）
         _default_accuracies = {
             "USDJPY": 0.3785,
             "EURUSD": 0.4501,
             "GBPJPY": 0.4147,
         }
         for pair, acc in _default_accuracies.items():
-            self._predictor.set_model_accuracy(pair, acc)
+            metrics = load_model_metrics(pair, self._settings.model_dir)
+            selected_acc = float(metrics.get("accuracy", acc)) if metrics else acc
+            self._predictor.set_model_accuracy(pair, selected_acc)
 
         # MT5 側に残っている建玉をローカル管理へ復元
         self._restore_managed_positions_from_broker()

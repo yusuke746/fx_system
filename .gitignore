@@ -9,9 +9,6 @@
 logs/
 *.log
 
-# === CSVファイル ===
-data/*.csv
-
 # === モデルファイル ===
 models/*.pkl
 models/*.txt
