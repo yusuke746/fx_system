@@ -85,17 +85,34 @@ FEATURE_NAMES = [
 
 assert len(FEATURE_NAMES) == 38, f"Expected 38 features, got {len(FEATURE_NAMES)}"
 
-# LightGBM 学習パラメータ（設計書 確定値）
+# LightGBM 学習パラメータ（デフォルト値）
 LGBM_PARAMS = {
     "max_depth": 4,
     "min_child_samples": 50,
     "reg_alpha": 0.2,
     "reg_lambda": 0.3,
     "n_estimators": 300,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
     "objective": "multiclass",
     "num_class": 3,   # 上昇 / 横ばい / 下落
     "verbosity": -1,
 }
+
+
+def get_lgbm_params(pair: str | None = None) -> dict:
+    """
+    ペアごとの LightGBM パラメータを返す。
+    config.json の ml.lgbm_params_per_pair.{pair} があれば LGBM_PARAMS をベースに上書きする。
+    """
+    params = LGBM_PARAMS.copy()
+    if pair:
+        config = get_trading_config()
+        per_pair = config.get("ml", {}).get("lgbm_params_per_pair", {}).get(pair, {})
+        if per_pair:
+            params.update(per_pair)
+    return params
 
 
 @dataclass
@@ -122,6 +139,7 @@ class PredictionResult:
         self,
         signal_direction: str,
         model_accuracy: float = 0.40,
+        threshold_overrides: dict | None = None,
     ) -> bool:
         """
         ペアのモデル精度に応じて閾値を動的調整する。
@@ -133,6 +151,9 @@ class PredictionResult:
         精度が中程度（>=0.40）: 中程度フィルター
         精度が低い（<0.40）:  緩めフィルター（Pineシグナルを尊重）
         """
+        if threshold_overrides and threshold_overrides.get("enabled") is False:
+            return False
+
         if model_accuracy >= 0.45:
             # 精度高: 両方の条件を厳しく
             direction_threshold = 0.45
@@ -145,6 +166,14 @@ class PredictionResult:
             # 精度低: フィルターを強化してノイズ通過を抑制
             direction_threshold = 0.45
             block_threshold = 0.40
+
+        if threshold_overrides:
+            direction_threshold = float(
+                threshold_overrides.get("direction_threshold", direction_threshold)
+            )
+            block_threshold = float(
+                threshold_overrides.get("block_threshold", block_threshold)
+            )
 
         # AND 条件: direction確率が高い かつ 逆方向確率が低い
         if signal_direction == "long":

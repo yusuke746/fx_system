@@ -23,7 +23,27 @@ from loguru import logger
 from sklearn.metrics import balanced_accuracy_score
 
 from core.time_manager import now_utc
-from ml.lgbm_model import LGBM_PARAMS, FEATURE_NAMES
+from config.settings import get_trading_config
+from ml.lgbm_model import LGBM_PARAMS, FEATURE_NAMES, get_lgbm_params
+
+
+def _build_class_weight(y: np.ndarray, directional_boost: float) -> dict[int, float]:
+    """クラス不均衡を補正しつつ、方向クラス(up/down)に重みを寄せる。"""
+    if len(y) == 0:
+        return {0: 1.0, 1: 1.0, 2: 1.0}
+
+    counts = np.bincount(y, minlength=3).astype(float)
+    total = float(counts.sum())
+    class_weight: dict[int, float] = {}
+    for cls in (0, 1, 2):
+        denom = max(counts[cls], 1.0)
+        class_weight[cls] = total / (3.0 * denom)
+
+    boost = max(0.5, float(directional_boost))
+    class_weight[0] *= boost
+    class_weight[2] *= boost
+
+    return class_weight
 
 
 def save_model_metrics(pair: str, model_dir: str, metrics: dict) -> Path:
@@ -67,7 +87,13 @@ def train_model(
     """
     logger.info(f"Training LightGBM for {pair}: {X.shape[0]} samples, {X.shape[1]} features")
 
-    model = lgb.LGBMClassifier(**LGBM_PARAMS, class_weight="balanced")
+    config = get_trading_config()
+    ml_cfg = config.get("ml", {})
+    directional_boost = float(ml_cfg.get("directional_class_boost", 1.0))
+    class_weight = _build_class_weight(y, directional_boost)
+
+    lgbm_params = get_lgbm_params(pair)
+    model = lgb.LGBMClassifier(**lgbm_params, class_weight=class_weight)
     model.fit(
         X, y,
         feature_name=FEATURE_NAMES,
@@ -102,6 +128,7 @@ def walk_forward_validate(
     train_days: int = 60,
     val_days: int = 15,
     samples_per_day: int = 96,  # signal_timesがNoneの場合のフォールバック
+    pair: str | None = None,
 ) -> dict:
     """
     ウォークフォワード検証を実行する。
@@ -113,6 +140,10 @@ def walk_forward_validate(
         {"accuracy": float, "fold_results": list, "n_folds": int, "date_based": bool, "total_samples": int}
     """
     total_samples = len(X)
+    config = get_trading_config()
+    ml_cfg = config.get("ml", {})
+    directional_boost = float(ml_cfg.get("directional_class_boost", 1.0))
+    lgbm_params = get_lgbm_params(pair)
 
     if signal_times is not None:
         times = np.array(signal_times)
@@ -142,7 +173,8 @@ def walk_forward_validate(
                 fold += 1
                 continue
 
-            model = lgb.LGBMClassifier(**LGBM_PARAMS, class_weight="balanced")
+            class_weight = _build_class_weight(y_train, directional_boost)
+            model = lgb.LGBMClassifier(**lgbm_params, class_weight=class_weight)
             model.fit(X_train, y_train, feature_name=FEATURE_NAMES)
             y_pred = model.predict(X_val)
             accuracy = float(np.mean(y_pred == y_val))
@@ -206,7 +238,8 @@ def walk_forward_validate(
         X_train, y_train = X[start:train_end], y[start:train_end]
         X_val, y_val = X[train_end:val_end], y[train_end:val_end]
 
-        model = lgb.LGBMClassifier(**LGBM_PARAMS, class_weight="balanced")
+        class_weight = _build_class_weight(y_train, directional_boost)
+        model = lgb.LGBMClassifier(**lgbm_params, class_weight=class_weight)
         model.fit(X_train, y_train, feature_name=FEATURE_NAMES)
 
         y_pred = model.predict(X_val)

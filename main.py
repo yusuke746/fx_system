@@ -339,7 +339,7 @@ class Orchestrator:
         ⑥ 発注
         """
         pair = payload["pair"]
-        direction = payload["direction"]
+        signal_direction = payload["direction"]
         atr = payload["atr"]
         atr_20d_avg = payload.get("atr_20d_avg", 0.0)  # ← [NEW] webhook から20日平均ATRを取得
         close_price = payload["close"]
@@ -347,7 +347,7 @@ class Orchestrator:
         # ← [NEW] LLM diff_detection_task で使用するATR情報をキャッシュ
         self._last_webhook_atrs[pair] = (atr, atr_20d_avg)
 
-        logger.info(f"Processing signal: {pair} {direction} ATR={atr} avg_atr_20d={atr_20d_avg}")
+        logger.info(f"Processing signal: {pair} {signal_direction} ATR={atr} avg_atr_20d={atr_20d_avg}")
 
         # ② Calendar Veto（Layer A）
         veto_active, veto_reason = self._calendar_veto.is_veto_active(pair)
@@ -356,7 +356,7 @@ class Orchestrator:
             insert_signal(self._db_conn, {
                 "pair": pair,
                 "signal_time": now_utc(),
-                "direction": direction,
+                "direction": signal_direction,
                 "mtf_confluence": payload.get("mtf_confluence"),
                 "alert_mode": payload.get("alert_mode"),
                 "quality_gate_pass": payload.get("quality_gate_pass"),
@@ -383,7 +383,7 @@ class Orchestrator:
             insert_signal(self._db_conn, {
                 "pair": pair,
                 "signal_time": now_utc(),
-                "direction": direction,
+                "direction": signal_direction,
                 "gpt_sentiment": sentiment_score,
                 "mtf_confluence": payload.get("mtf_confluence"),
                 "alert_mode": payload.get("alert_mode"),
@@ -402,7 +402,7 @@ class Orchestrator:
             insert_signal(self._db_conn, {
                 "pair": pair,
                 "signal_time": now_utc(),
-                "direction": direction,
+                "direction": signal_direction,
                 "mtf_confluence": payload.get("mtf_confluence"),
                 "alert_mode": payload.get("alert_mode"),
                 "quality_gate_pass": payload.get("quality_gate_pass"),
@@ -432,7 +432,7 @@ class Orchestrator:
             insert_training_sample(self._db_conn, {
                 "pair": pair,
                 "signal_time": now,
-                "direction": direction,
+                "direction": signal_direction,
                 "close_price": payload.get("close"),
                 "atr": payload.get("atr"),
                 "fvg_4h_zone_active": payload.get("fvg_4h_zone_active", False),
@@ -500,7 +500,7 @@ class Orchestrator:
             insert_signal(self._db_conn, {
                 "pair": pair,
                 "signal_time": now_utc(),
-                "direction": direction,
+                "direction": signal_direction,
                 "mtf_confluence": payload.get("mtf_confluence"),
                 "alert_mode": payload.get("alert_mode"),
                 "quality_gate_pass": payload.get("quality_gate_pass"),
@@ -524,7 +524,7 @@ class Orchestrator:
         insert_signal(self._db_conn, {
             "pair": pair,
             "signal_time": now_utc(),
-            "direction": direction,
+            "direction": signal_direction,
             "lgbm_prob_up": prediction.prob_up,
             "lgbm_prob_flat": prediction.prob_flat,
             "lgbm_prob_down": prediction.prob_down,
@@ -540,7 +540,16 @@ class Orchestrator:
 
         # LightGBM が強いシグナルを出しているか確認
         model_acc = self._predictor.get_model_accuracy(pair)
-        if not prediction.is_strong_signal(direction, model_acc):
+        ml_cfg = self._config.get("ml", {})
+        threshold_cfg = ml_cfg.get("prediction_thresholds", {})
+        execution_direction_mode = str(ml_cfg.get("execution_direction_mode", "signal")).lower()
+        direction = signal_direction
+        if execution_direction_mode == "model" and prediction.direction != "flat":
+            direction = prediction.direction
+
+        pair_thresholds = threshold_cfg.get(pair, {})
+        threshold_overrides = pair_thresholds.get(direction)
+        if not prediction.is_strong_signal(direction, model_acc, threshold_overrides):
             logger.info(
                 f"Signal not strong enough: {prediction.prob_up:.2f}/"
                 f"{prediction.prob_flat:.2f}/{prediction.prob_down:.2f}"
@@ -556,7 +565,7 @@ class Orchestrator:
             insert_signal(self._db_conn, {
                 "pair": pair,
                 "signal_time": now_utc(),
-                "direction": direction,
+                "direction": signal_direction,
                 "lgbm_prob_up": prediction.prob_up,
                 "lgbm_prob_flat": prediction.prob_flat,
                 "lgbm_prob_down": prediction.prob_down,
@@ -571,6 +580,35 @@ class Orchestrator:
                 "veto_reason": "flat_signal",
             })
             return
+
+        pair_direction_filter = self._config.get("pair_direction_filter", {})
+        allowed_directions = pair_direction_filter.get(pair)
+        if allowed_directions and direction not in allowed_directions:
+            logger.info(f"Signal rejected by pair direction filter: {pair} {direction}")
+            insert_signal(self._db_conn, {
+                "pair": pair,
+                "signal_time": now_utc(),
+                "direction": signal_direction,
+                "lgbm_prob_up": prediction.prob_up,
+                "lgbm_prob_flat": prediction.prob_flat,
+                "lgbm_prob_down": prediction.prob_down,
+                "gpt_sentiment": sentiment_score,
+                "mtf_confluence": payload.get("mtf_confluence"),
+                "alert_mode": payload.get("alert_mode"),
+                "quality_gate_pass": payload.get("quality_gate_pass"),
+                "vol_ok": payload.get("vol_ok"),
+                "in_session": payload.get("in_session"),
+                "is_friday_late": payload.get("is_friday_late"),
+                "executed": False,
+                "veto_reason": "pair_direction_filter",
+            })
+            return
+
+        if direction != signal_direction:
+            logger.info(
+                f"Execution direction overridden by model: signal={signal_direction} -> trade={direction} "
+                f"({prediction.prob_up:.2f}/{prediction.prob_flat:.2f}/{prediction.prob_down:.2f})"
+            )
 
         # ⑤ ドテン判定
         existing_positions = [

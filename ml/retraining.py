@@ -69,6 +69,7 @@ def _get_future_close(pair: str, signal_time_utc: datetime, horizon_minutes: int
 def label_unlabeled_samples(
     db_conn: sqlite3.Connection,
     horizon_minutes: int = 240,
+    horizon_per_pair: dict | None = None,
     limit: int = 5000,
 ) -> dict:
     """未ラベルサンプルに将来価格ベースでラベル付けを行う。"""
@@ -91,7 +92,10 @@ def label_unlabeled_samples(
         for sample in rows:
             try:
                 signal_time = _to_datetime_utc(sample["signal_time"])
-                future_close = _get_future_close(sample["pair"], signal_time, horizon_minutes)
+                pair_horizon = int(
+                    (horizon_per_pair or {}).get(sample["pair"], horizon_minutes)
+                )
+                future_close = _get_future_close(sample["pair"], signal_time, pair_horizon)
                 if future_close is None:
                     skipped += 1
                     continue
@@ -232,6 +236,7 @@ def retrain_models_from_db(
                 datetime.fromisoformat(r["signal_time"]) for r in rows
                 if r.get("signal_time")
             ],
+            pair=pair,
         )
         cv_acc = float(val.get("accuracy", 0.0))
         if cv_acc < min_cv_accuracy:
@@ -266,9 +271,10 @@ def run_weekly_retraining(db_conn: sqlite3.Connection) -> dict:
     config = get_trading_config()
 
     horizon_minutes = int(config.get("ml", {}).get("label_horizon_minutes", 240))
+    horizon_per_pair: dict = config.get("ml", {}).get("label_horizon_minutes_per_pair", {})
     min_samples_per_pair = int(config.get("ml", {}).get("min_samples_per_pair", 300))
 
-    labeling = label_unlabeled_samples(db_conn, horizon_minutes=horizon_minutes)
+    labeling = label_unlabeled_samples(db_conn, horizon_minutes=horizon_minutes, horizon_per_pair=horizon_per_pair)
     retrain = retrain_models_from_db(
         db_conn,
         model_dir=settings.model_dir,

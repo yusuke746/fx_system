@@ -1,9 +1,9 @@
 {
   "pair": "GBPJPY",
-  "updated_at_utc": "2026-03-22T04:22:38.980827+00:00",
-  "accuracy": 0.49118803639227104,
-  "balanced_accuracy": 0.3858207489782386,
-  "majority_baseline": 0.5420461923440698,
-  "samples": 3468,
+  "updated_at_utc": "2026-03-22T06:09:27.581213+00:00",
+  "accuracy": 0.5094486341396337,
+  "balanced_accuracy": 0.47400087569821353,
+  "majority_baseline": 0.48427375312206317,
+  "samples": 5759,
   "source": "bootstrap_csv"
 }

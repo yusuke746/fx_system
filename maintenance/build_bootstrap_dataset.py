@@ -197,12 +197,12 @@ def _simulate_label(
 ) -> int:
     """
     エントリー後のhorizon_bars本分のhigh/lowを参照し、
-    SL/TPのどちらが先に当たるかでラベルを決定する。
+    到達した価格方向でラベルを決定する（0=上昇, 1=横ばい, 2=下落）。
 
     Returns:
-        0: TP到達（勝ち）
+        0: 上昇（up）
         1: horizon_bars経過しても未決（flat）
-        2: SL到達（負け）
+        2: 下落（down）
     """
     pip_unit = _pip_unit(pair)
     future_bars = df.iloc[row_idx + 1: row_idx + horizon_bars + 1]
@@ -212,17 +212,17 @@ def _simulate_label(
         sl_price = entry_price - sl_pips * pip_unit
         for _, bar in future_bars.iterrows():
             if bar["high"] >= tp_price:
-                return 0
+                return 0  # up
             if bar["low"] <= sl_price:
-                return 2
+                return 2  # down
     else:  # short
         tp_price = entry_price - tp_pips * pip_unit
         sl_price = entry_price + sl_pips * pip_unit
         for _, bar in future_bars.iterrows():
             if bar["low"] <= tp_price:
-                return 0
+                return 2  # down
             if bar["high"] >= sl_price:
-                return 2
+                return 0  # up
 
     return 1
 

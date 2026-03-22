@@ -28,7 +28,7 @@
     "max_total_exposure_pct": 10.0,
     "max_positions": 5,
     "max_usd_exposure": 4,
-    "max_jpy_exposure": 2,
+    "max_jpy_exposure": 3,
     "sl_multiplier": 1.5,
     "sl_min_pips": 15,
     "sl_max_pips": 35,
@@ -42,10 +42,90 @@
   },
   "ml": {
     "label_horizon_minutes": 240,
+    "label_horizon_minutes_per_pair": {
+      "EURUSD": 300
+    },
     "min_samples_per_pair": 300,
     "min_directional_samples": 30,
     "min_cv_accuracy": 0.40,
-    "lookback_days": 90
+    "lookback_days": 90,
+    "directional_class_boost": 1.0,
+    "execution_direction_mode": "model",
+    "lgbm_params_per_pair": {
+      "USDJPY": {
+        "n_estimators": 250,
+        "learning_rate": 0.012,
+        "max_depth": 5,
+        "min_child_samples": 50,
+        "num_leaves": 31,
+        "subsample": 1.0,
+        "colsample_bytree": 0.65,
+        "reg_alpha": 0.35,
+        "reg_lambda": 0.3,
+        "objective": "multiclass",
+        "num_class": 3,
+        "verbosity": -1
+      },
+      "EURUSD": {
+        "n_estimators": 300,
+        "learning_rate": 0.014,
+        "max_depth": 6,
+        "min_child_samples": 100,
+        "num_leaves": 55,
+        "subsample": 0.75,
+        "colsample_bytree": 0.8,
+        "reg_alpha": 0.2,
+        "reg_lambda": 0.35,
+        "objective": "multiclass",
+        "num_class": 3,
+        "verbosity": -1
+      },
+      "GBPJPY": {
+        "n_estimators": 150,
+        "learning_rate": 0.025,
+        "max_depth": 3,
+        "min_child_samples": 40,
+        "num_leaves": 63,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 0.5,
+        "reg_lambda": 0.05,
+        "objective": "multiclass",
+        "num_class": 3,
+        "verbosity": -1
+      }
+    },
+    "prediction_thresholds": {
+      "USDJPY": {
+        "long": {
+          "direction_threshold": 0.4,
+          "block_threshold": 0.45
+        },
+        "short": {
+          "enabled": false
+        }
+      },
+      "EURUSD": {
+        "long": {
+          "direction_threshold": 0.6,
+          "block_threshold": 0.3
+        },
+        "short": {
+          "direction_threshold": 0.6,
+          "block_threshold": 0.4
+        }
+      },
+      "GBPJPY": {
+        "long": {
+          "direction_threshold": 0.6,
+          "block_threshold": 0.35
+        },
+        "short": {
+          "direction_threshold": 0.4,
+          "block_threshold": 0.3
+        }
+      }
+    }
   },
   "optimization": {
     "auto_optimize": true,

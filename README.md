@@ -82,21 +82,262 @@ MT5に送信する時刻は `utc_to_mt5_server()` でEETに変換します。
 | 取引除外時間帯 | 00:00〜07:00 | 15:00〜22:00 (前日) | 深夜帯エントリー禁止 |
 | 金曜クローズ | 金曜 22:00 | 金曜 13:00 | 全ポジション強制決済 |
 
-## セットアップ
+## 本番環境セットアップ手順
 
-```bash
-# 1. 依存パッケージインストール
+### 前提条件
+
+| 項目 | 要件 |
+|------|------|
+| OS | Windows Server 2019/2022 または Windows 10/11（常時起動 VPS 推奨） |
+| Python | 3.11 以上（3.13 以下推奨） |
+| MT5 | XMTrading の MetaTrader 5 ターミナルをインストール済み |
+| ポート | 外部 → 8000（または任意）のインバウンドを開放 |
+| OpenAI | API キー取得済み（GPT-5.2 アクセス権が必要） |
+| Discord | Webhook URL 取得済み（通常通知用 + Critical 用の2本推奨） |
+
+---
+
+### ステップ 1: ソースコード配置
+
+```bat
+cd C:\
+git clone <YOUR_REPO_URL> fx_system
+cd fx_system
+```
+
+---
+
+### ステップ 2: Python 仮想環境の作成と依存インストール
+
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+pip install --upgrade pip
 pip install -r requirements.txt
+```
 
-# 2. 環境変数設定
+> optuna を使う場合（ハイパーパラメータ再チューニング時のみ）:
+> ```bat
+> pip install optuna
+> ```
+
+---
+
+### ステップ 3: 環境変数設定（.env）
+
+```bat
 copy .env.example .env
-# .env を編集してAPIキー等を設定
+notepad .env
+```
 
-# 3. DB初期化 & システム起動
+`.env` に以下をすべて設定します:
+
+```dotenv
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx          # OpenAI API キー
+DISCORD_WEBHOOK_URL=https://discord.com/...  # 通常通知用 Webhook
+DISCORD_WEBHOOK_CRITICAL_URL=https://...     # Critical 通知用 Webhook
+MT5_LOGIN=123456                             # MT5 口座番号
+MT5_PASSWORD=your_password                  # MT5 パスワード
+MT5_SERVER=XMTrading-MT5                    # MT5 サーバー名
+DB_PATH=./db/trading.db
+DB_BACKUP_PATH=./db/backup/
+LOG_DIR=./logs/
+MODEL_DIR=./models/
+CONFIG_PATH=./config.json
+DEMO_MODE=false                              # 本番時は false（true=発注なし）
+WEBHOOK_SECRET=your_shared_webhook_token    # TradingView と共有するトークン
+WEBHOOK_PORT=8000
+```
+
+> **DEMO_MODE について**  
+> `true` にすると MT5 への発注は行われず、ログとシグナルへの DB 記録のみ行います。  
+> 初回は `true` で動作確認してから `false` に切り替えることを推奨します。
+
+---
+
+### ステップ 4: ディレクトリ初期化
+
+```bat
+mkdir db db\backup logs models data
+```
+
+---
+
+### ステップ 5: 初期モデルの作成（TradingView CSV ブートストラップ）
+
+モデルなしでは起動時に学習済モデル未ロードの状態になります。  
+必ず以下のどちらかの方法でモデルを用意してください。
+
+#### 方式 A（推奨）: TradingView CSV から学習
+
+1. `pinescript/mtf_smc_v2_3.pine` を TradingView に追加
+2. `i_csv_mode` を ON（CSVエクスポートモード）にする
+3. 各ペアの **15分足チャート** で `Export chart data` → CSV 保存  
+   （ファイル名: `USDJPY_chart.csv`, `EURUSD_chart.csv`, `GBPJPY_chart.csv`）
+4. CSV を `fx_system/data/` に配置
+5. 以下で3ペア一括ビルド＋学習:
+
+```bat
+.venv\Scripts\activate
+python -m maintenance.run_bootstrap_batch --input-dir data --model-dir models
+```
+
+> `config.json` の `ml.label_horizon_minutes_per_pair` に従い EURUSD は 300 分ホライズンで自動ビルドします。
+
+WFV 検証をスキップして高速に学習したい場合:
+
+```bat
+python -m maintenance.run_bootstrap_batch --input-dir data --model-dir models --skip-wfv
+```
+
+#### 方式 B（疎通テスト最速）: ダミーモデル生成
+
+```bat
+python bootstrap_models.py
+```
+
+> 実運用には不向きです。動作確認後、方式 A に切り替えてください。
+
+**学習完了後の確認:**
+
+```bat
+dir models\lgbm_*.pkl
+dir models\lgbm_*_metrics.json
+```
+
+3ペア分（`lgbm_USDJPY.pkl`, `lgbm_EURUSD.pkl`, `lgbm_GBPJPY.pkl`）が存在することを確認します。
+
+---
+
+### ステップ 6: MT5 ターミナルの設定
+
+1. MT5 を起動し、対象口座にログイン
+2. **ツール → オプション → Expert Advisors** で以下を有効化:
+   - 「自動売買を許可する」にチェック
+   - 「DLL のインポートを許可する」にチェック
+3. MT5 を**最小化で常時起動**した状態にしておく（終了不可）
+
+---
+
+### ステップ 7: TradingView アラート設定
+
+1. TradingView で 15 分足チャートを開く
+2. Pine Editor に `pinescript/mtf_smc_v2_3.pine` を貼り付けて「チャートに追加」
+3. `i_webhook_token` = `.env` の `WEBHOOK_SECRET` と同じ値を設定
+4. `i_alert_mode` = **`ml_first`（推奨）**
+5. 通貨ペアごとに `i_pair` を変更して **3 つのアラート** を作成:
+
+| ペア | `i_pair` | Webhook URL |
+|------|--------|----|
+| USDJPY | `usdjpy` | `http://YOUR_VPS_IP:8000/webhook` |
+| EURUSD | `eurusd` | `http://YOUR_VPS_IP:8000/webhook` |
+| GBPJPY | `gbpjpy` | `http://YOUR_VPS_IP:8000/webhook` |
+
+アラートの設定:
+- 条件: **`Any alert() function call`**
+- 通知先: **Webhook URL のみ**（他の通知は不要）
+
+> VPS に SSL 証明書（HTTPS）を設定している場合は `https://` を使用してください。  
+> TradingView の Webhook は HTTP も受け付けますが、本番では HTTPS 推奨です。
+
+---
+
+### ステップ 8: システム起動
+
+```bat
+cd C:\fx_system
+.venv\Scripts\activate
 python main.py
 ```
 
-## モデル準備（初回のみ必須）
+起動後に以下のログが出れば正常です:
+
+```
+INFO  | main.py | MT5 connected: XMTrading-MT5
+INFO  | main.py | LightGBM models loaded: USDJPY, EURUSD, GBPJPY
+INFO  | main.py | Webhook server started on port 8000
+INFO  | main.py | Scheduler started
+```
+
+Discord に「システム起動」通知が届くことを確認します。
+
+---
+
+### ステップ 9: 動作確認（DEMO_MODE=true で疎通テスト）
+
+```bat
+# 別ターミナルでヘルスチェック
+curl http://localhost:8000/health
+
+# Webhook 疎通テスト（手動でシグナルを送信）
+python test_webhook_post.py
+```
+
+`DEMO_MODE=true` の状態で TradingView からシグナルが届き、以下を確認します:
+
+- `signals` テーブルにレコードが追加される
+- `training_samples` テーブルにレコードが追加される
+- Discord に通知が届く
+- LightGBM gate 通過ログが出る
+
+確認が取れたら `.env` の `DEMO_MODE=false` に変更して再起動します。
+
+---
+
+### ステップ 10: 常時起動設定（Windows タスクスケジューラ）
+
+VPS 再起動時に自動起動するよう設定します。
+
+**タスクの作成:**
+
+1. 「タスクスケジューラ」を管理者で開く
+2. 「タスクの作成」 → 全般タブ:
+   - 名前: `FX AutoTrading System`
+   - 「ユーザーがログオンしているかどうかにかかわらず実行する」を選択
+   - 「最上位の特権で実行する」にチェック
+3. トリガータブ → 「コンピュータのスタートアップ時」
+4. 操作タブ:
+   - プログラム: `C:\fx_system\.venv\Scripts\python.exe`
+   - 引数: `main.py`
+   - 開始（フォルダ）: `C:\fx_system`
+5. 設定タブ:
+   - 「タスクが失敗した場合の再起動の間隔」: 1 分、最大 3 回
+
+または PowerShell でバッチ起動スクリプトを作成する方法もあります:
+
+```bat
+REM start_trading.bat
+cd /d C:\fx_system
+.venv\Scripts\python.exe main.py >> logs\startup.log 2>&1
+```
+
+---
+
+### ステップ 11: 起動後の継続監視
+
+**training_samples の蓄積確認（毎日）:**
+
+```bat
+python -m maintenance.check_training_samples
+python -m maintenance.check_training_samples --hours 24
+```
+
+確認ポイント:
+- `summary.total` が日々増加している
+- `per_pair.latest_signal_time` が更新されている
+- 日曜 23:00 JST 以降に `unlabeled` が減り `labeled` が増える
+
+**モデル精度確認（週次）:**
+
+```bat
+type models\lgbm_USDJPY_metrics.json
+type models\lgbm_EURUSD_metrics.json
+type models\lgbm_GBPJPY_metrics.json
+```
+
+`balanced_accuracy` が `majority_baseline` を上回っているかを確認します。
+
+---
 
 ## 最新実装メモ
 

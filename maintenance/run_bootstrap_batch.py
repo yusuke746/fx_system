@@ -30,9 +30,22 @@ import pandas as pd
 
 from maintenance.build_bootstrap_dataset import build_dataset
 from ml.lgbm_model import FEATURE_NAMES
-from ml.trainer import train_model, walk_forward_validate
+from ml.trainer import train_model, walk_forward_validate, save_model_metrics
 
 DEFAULT_PAIRS = ["USDJPY", "EURUSD", "GBPJPY"]
+
+
+def _horizon_bars_for_pair(pair: str, default_bars: int) -> int:
+    """config.json の label_horizon_minutes_per_pair があれば / 15 で bars 換算して返す。"""
+    try:
+        from config.settings import get_trading_config
+        cfg = get_trading_config()
+        per_pair_minutes = cfg.get("ml", {}).get("label_horizon_minutes_per_pair", {}).get(pair)
+        if per_pair_minutes:
+            return max(1, int(per_pair_minutes) // 15)
+    except Exception:
+        pass
+    return default_bars
 
 
 def _load_xy(input_path: Path, pair: str) -> tuple[np.ndarray, np.ndarray, int, list | None]:
@@ -94,11 +107,12 @@ def main() -> None:
             continue
 
         try:
+            horizon = _horizon_bars_for_pair(pair, args.horizon_bars)
             built = build_dataset(
                 input_path=input_path,
                 output_path=output_path,
                 pair=pair,
-                horizon_bars=args.horizon_bars,
+                horizon_bars=horizon,
             )
 
             X, y, dropped, signal_times = _load_xy(output_path, pair=pair)
@@ -113,10 +127,23 @@ def main() -> None:
 
             wfv_acc = None
             if not args.skip_wfv:
-                val = walk_forward_validate(X, y, signal_times=signal_times)
+                val = walk_forward_validate(X, y, signal_times=signal_times, pair=pair)
                 wfv_acc = float(val.get("accuracy", 0.0))
 
             train_model(X, y, pair=pair, model_dir=args.model_dir)
+
+            if val is not None:
+                save_model_metrics(
+                    pair=pair,
+                    model_dir=args.model_dir,
+                    metrics={
+                        "accuracy": float(val.get("accuracy", 0.0)),
+                        "balanced_accuracy": float(val.get("balanced_accuracy", 0.0)),
+                        "majority_baseline": float(val.get("majority_baseline", 0.0)),
+                        "samples": int(len(X)),
+                        "source": "bootstrap_csv",
+                    },
+                )
 
             summary.append({
                 "pair": pair,

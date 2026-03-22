@@ -75,7 +75,7 @@ def main() -> None:
 
     val = None
     if not args.skip_wfv:
-        val = walk_forward_validate(X, y, signal_times=signal_times)
+        val = walk_forward_validate(X, y, signal_times=signal_times, pair=args.pair)
         print(f"walk_forward_accuracy={val.get('accuracy', 0.0):.4f}")
         print(f"walk_forward_balanced_accuracy={val.get('balanced_accuracy', 0.0):.4f}")
         print(f"walk_forward_majority_baseline={val.get('majority_baseline', 0.0):.4f}")

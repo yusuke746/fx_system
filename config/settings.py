@@ -110,9 +110,14 @@ def _normalize_trading_config(config: dict) -> dict:
 
     ml = config.setdefault("ml", {})
     ml.setdefault("label_horizon_minutes", 240)
+    ml.setdefault("label_horizon_minutes_per_pair", {})
     ml.setdefault("min_samples_per_pair", 300)
     ml.setdefault("min_directional_samples", 30)
     ml.setdefault("min_cv_accuracy", 0.40)
+    ml.setdefault("directional_class_boost", 1.0)
+    ml.setdefault("lgbm_params_per_pair", {})
+    ml.setdefault("execution_direction_mode", "signal")
+    ml.setdefault("prediction_thresholds", {})
 
     return config
 
