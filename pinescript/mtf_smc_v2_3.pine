@@ -50,15 +50,9 @@ i_swing_15m      = input.int(3,            "Swing ルックバック (15M) [NEW]
 i_webhook_token  = input.string("",        "Webhook共有トークン", tooltip=".env の WEBHOOK_SECRET と同じ値")
 
 // ── [NEW v2.3] 追加パラメータ ──────────────────────────────────
-i_sweep_min_str  = input.float(0.3, "Sweep最小強度 ATR倍率 [NEW]",
-     minval=0.1, maxval=1.5, step=0.05,
-     tooltip="この倍率未満のSweepはノイズとして除外。小さいほど感度UP、大きいほど厳格。")
-i_sweep_timeout  = input.int(16, "Sweep待機タイムアウト 15Mバー数 [NEW]",
-     minval=4, maxval=48,
-     tooltip="Sweep検出後、この本数以内に15M MSBが出なければ無効化。16本=4時間。")
-i_fvg_mit_ratio  = input.float(0.5, "FVG使用済み閾値 充填率 [NEW]",
-     minval=0.1, maxval=1.0, step=0.1,
-     tooltip="FVGゾーンにこの比率以上価格が入ったら使用済みとしてリセット。0.5=50%。")
+i_sweep_min_str  = input.float(0.3, "Sweep最小強度 ATR倍率 [NEW]", minval=0.1, maxval=1.5, step=0.05, tooltip="この倍率未満のSweepはノイズとして除外。小さいほど感度UP、大きいほど厳格。")
+i_sweep_timeout  = input.int(8, "Sweep待機タイムアウト 15Mバー数 [NEW]", minval=4, maxval=48, tooltip="Sweep検出後、この本数以内に15M MSBが出なければ無効化。8本=2時間。")
+i_fvg_mit_ratio  = input.float(0.5, "FVG使用済み閾値 充填率 [NEW]", minval=0.1, maxval=1.0, step=0.1, tooltip="FVGゾーンにこの比率以上価格が入ったら使用済みとしてリセット。0.5=50%。")
 i_export_csv     = input.bool(false, "CSVエクスポートモード [NEW]", tooltip="ONでシグナル確定足のみ35特徴量をデータウィンドウへ出力。TradingViewのExport chart data用。")
 
 
@@ -125,6 +119,8 @@ if ob_4h_valid and not na(ob_4h_mid)
 
 ob_4h_zone_active = ob_4h_valid and not na(ob_4h_top) and
      close >= ob_4h_bottom and close <= ob_4h_top
+pip_unit_zone = syminfo.currency == "JPY" ? 0.01 : 0.0001
+ob_4h_size_pips = (ob_4h_valid and not na(ob_4h_top) and not na(ob_4h_bottom)) ? math.abs(ob_4h_top - ob_4h_bottom) / pip_unit_zone : 0.0
 
 // ── 4H FVG + FVGミティゲーション [UPDATED] ──────────────────────
 high_4h_2 = request.security(syminfo.tickerid, "240", high[2])
@@ -169,6 +165,7 @@ fvg_4h_zone_active = fvg_4h_valid and not na(fvg_4h_top) and
 
 fvg_4h_fill_ratio = fvg_4h_zone_active and (fvg_4h_top - fvg_4h_bottom) > 0 ?
      (close - fvg_4h_bottom) / (fvg_4h_top - fvg_4h_bottom) : 0.0
+fvg_4h_size_pips = (fvg_4h_valid and not na(fvg_4h_top) and not na(fvg_4h_bottom)) ? math.abs(fvg_4h_top - fvg_4h_bottom) / pip_unit_zone : 0.0
 
 
 // =====================================================
@@ -219,6 +216,7 @@ else
 liq_sweep_1h       = liq_sweep_bull_1h or liq_sweep_bear_1h
 // [UPDATE] 強度フィルター適用済みSweep（mtf_confluence に使用）
 liq_sweep_qualified = liq_sweep_1h and sweep_strength >= i_sweep_min_str
+sweep_depth_atr_ratio = sweep_strength
 
 // ── 1H BOS (Break of Structure) ──────────────────────────────────
 var bool bos_1h_bull = false
@@ -496,7 +494,7 @@ f_build_json(dir, msb_conf, choch_flag) =>
     _p4 = ',"rsi_14":' + str.tostring(math.round(rsi_14, 2)) + ',"rsi_zone":' + str.tostring(rsi_zone) + ',"macd_histogram":' + str.tostring(math.round(macd_hist, 6)) + ',"macd_signal_cross":' + str.tostring(_mc)
     _p5 = ',"stoch_k":' + str.tostring(math.round(stoch_k, 2)) + ',"stoch_d":' + str.tostring(math.round(stoch_d, 2)) + ',"momentum_3bar":' + str.tostring(math.round(momentum_3bar, 4))
     _p6 = ',"close_vs_ema20_4h":' + str.tostring(math.round(close_vs_ema20_4h, 4)) + ',"close_vs_ema50_4h":' + str.tostring(math.round(close_vs_ema50_4h, 4)) + ',"high_low_range_15m":' + str.tostring(math.round(high_low_range_15m, 5))
-    _p7 = ',"ob_4h_distance_pips":' + str.tostring(math.round(ob_4h_distance, 4)) + ',"fvg_4h_fill_ratio":' + str.tostring(math.round(fvg_4h_fill_ratio, 4)) + ',"liq_sweep_strength":' + str.tostring(math.round(sweep_strength, 4)) + ',"tp_swing_pips":' + str.tostring(math.round(dir == "long" ? tp_swing_long_pips : tp_swing_short_pips, 1)) + ',"tp_fvg_pips":' + str.tostring(math.round(dir == "long" ? tp_fvg_long_pips : tp_fvg_short_pips, 1))
+    _p7 = ',"ob_4h_distance_pips":' + str.tostring(math.round(ob_4h_distance, 4)) + ',"fvg_4h_fill_ratio":' + str.tostring(math.round(fvg_4h_fill_ratio, 4)) + ',"liq_sweep_strength":' + str.tostring(math.round(sweep_strength, 4)) + ',"fvg_4h_size_pips":' + str.tostring(math.round(fvg_4h_size_pips, 1)) + ',"ob_4h_size_pips":' + str.tostring(math.round(ob_4h_size_pips, 1)) + ',"sweep_depth_atr_ratio":' + str.tostring(math.round(sweep_depth_atr_ratio, 4)) + ',"tp_swing_pips":' + str.tostring(math.round(dir == "long" ? tp_swing_long_pips : tp_swing_short_pips, 1)) + ',"tp_fvg_pips":' + str.tostring(math.round(dir == "long" ? tp_fvg_long_pips : tp_fvg_short_pips, 1))
     _p8 = ',"prior_candle_body_ratio":' + str.tostring(math.round(prior_candle_body_ratio, 4)) + ',"consecutive_same_dir":' + str.tostring(consecutive_same_dir) + ',"pivot_proximity":' + str.tostring(math.round(pivot_proximity, 4)) + ',"sweep_pending_bars":' + str.tostring(sweep_pending_bars)
     _p9 = ',"vol_ok":' + str.tostring(vol_ok) + ',"quality_gate_pass":' + str.tostring(quality_gate_pass) + ',"in_session":' + str.tostring(in_session) + ',"is_friday_late":' + str.tostring(is_friday_late) + ',"alert_mode":"' + i_alert_mode + '"'
     _p1 + _p2 + _p3 + _p4 + _p5 + _p6 + _p7 + _p8 + _p9 + '}'
@@ -583,7 +581,7 @@ plotshape(choch_bear_started, style=shape.xcross, location=location.belowbar,
 // ─── デバッグテーブル（右下固定） ────────────────────────────────
 var table dbg = table.new(position.bottom_right, 2, 12, bgcolor=color.new(color.black, 70), border_color=color.gray, border_width=1, frame_color=color.gray, frame_width=1)
 
-if barstate.islast
+if barstate.islastconfirmedhistory
     // MTFスコアの色
     color conf_col = mtf_confluence >= 3 ? color.lime : mtf_confluence >= 2 ? color.yellow : color.gray
 
@@ -705,6 +703,9 @@ plot(csv_is_signal ? momentum_3bar : na, title="CSV_momentum_3bar", display=disp
 plot(csv_is_signal ? ob_4h_distance : na, title="CSV_ob_4h_distance_pips", display=display.data_window)
 plot(csv_is_signal ? fvg_4h_fill_ratio : na, title="CSV_fvg_4h_fill_ratio", display=display.data_window)
 plot(csv_is_signal ? sweep_strength : na, title="CSV_liq_sweep_strength", display=display.data_window)
+plot(csv_is_signal ? fvg_4h_size_pips : na, title="CSV_fvg_4h_size_pips", display=display.data_window)
+plot(csv_is_signal ? ob_4h_size_pips : na, title="CSV_ob_4h_size_pips", display=display.data_window)
+plot(csv_is_signal ? sweep_depth_atr_ratio : na, title="CSV_sweep_depth_atr_ratio", display=display.data_window)
 plot(csv_is_signal ? prior_candle_body_ratio : na, title="CSV_prior_candle_body_ratio", display=display.data_window)
 plot(csv_is_signal ? consecutive_same_dir : na, title="CSV_consecutive_same_dir", display=display.data_window)
 plot(csv_is_signal ? pivot_proximity : na, title="CSV_pivot_proximity", display=display.data_window)

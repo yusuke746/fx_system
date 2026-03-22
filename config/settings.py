@@ -94,6 +94,9 @@ def _normalize_trading_config(config: dict) -> dict:
     risk.setdefault("time_decay_min_profit_atr", 0.5)
     risk.setdefault("trailing_update_cooldown_seconds", 30)
     risk.setdefault("trailing_min_step_pips", 2.0)
+    risk.setdefault("sl_cap_atr_multiplier", 1.0)
+    risk.setdefault("demo_fixed_lot_enabled", False)
+    risk.setdefault("demo_fixed_lot", 0.01)
 
     llm = config.setdefault("llm", {})
     llm.setdefault("model_diff", "gpt-5-nano")

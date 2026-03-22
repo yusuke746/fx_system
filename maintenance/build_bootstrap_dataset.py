@@ -3,10 +3,10 @@ TradingView CSV から初期学習用データセットを生成する。
 
 想定入力:
   - Pine の CSVエクスポートモードで出力したチャートCSV
-  - CSV_* 列に 35特徴量が含まれる
+    - CSV_* 列に 38特徴量が含まれる
 
 出力:
-  - 学習用CSV（35特徴量 + label + 補助列）
+    - 学習用CSV（38特徴量 + label + 補助列）
 
 使い方:
   python maintenance/build_bootstrap_dataset.py \
@@ -54,6 +54,9 @@ FEATURE_COLS = [
     "CSV_ob_4h_distance_pips",
     "CSV_fvg_4h_fill_ratio",
     "CSV_liq_sweep_strength",
+    "CSV_fvg_4h_size_pips",
+    "CSV_ob_4h_size_pips",
+    "CSV_sweep_depth_atr_ratio",
     "CSV_prior_candle_body_ratio",
     "CSV_consecutive_same_dir",
     "CSV_sweep_pending_bars",
@@ -62,6 +65,48 @@ FEATURE_COLS = [
     "CSV_calendar_risk_score",
     "CSV_sentiment_score",
 ]
+
+REQUIRED_BASE_COLS = [
+    "CSV_fvg_4h_zone_active",
+    "CSV_ob_4h_zone_active",
+    "CSV_liq_sweep_1h",
+    "CSV_liq_sweep_qualified",
+    "CSV_bos_1h",
+    "CSV_choch_1h",
+    "CSV_msb_15m_confirmed",
+    "CSV_mtf_confluence",
+    "CSV_atr_ratio",
+    "CSV_bb_width",
+    "CSV_close_vs_ema20_4h",
+    "CSV_close_vs_ema50_4h",
+    "CSV_high_low_range_15m",
+    "CSV_trend_direction",
+    "CSV_momentum_long",
+    "CSV_momentum_short",
+    "CSV_macd_histogram",
+    "CSV_macd_signal_cross",
+    "CSV_rsi_14",
+    "CSV_rsi_zone",
+    "CSV_stoch_k",
+    "CSV_stoch_d",
+    "CSV_momentum_3bar",
+    "CSV_ob_4h_distance_pips",
+    "CSV_fvg_4h_fill_ratio",
+    "CSV_liq_sweep_strength",
+    "CSV_prior_candle_body_ratio",
+    "CSV_consecutive_same_dir",
+    "CSV_sweep_pending_bars",
+    "CSV_open_positions_count",
+    "CSV_max_dd_24h",
+    "CSV_calendar_risk_score",
+    "CSV_sentiment_score",
+]
+
+OPTIONAL_NEW_COLS_WITH_DEFAULT = {
+    "CSV_fvg_4h_size_pips": 0.0,
+    "CSV_ob_4h_size_pips": 0.0,
+    "CSV_sweep_depth_atr_ratio": 0.0,
+}
 
 RENAME_TO_MODEL = {
     "CSV_fvg_4h_zone_active": "fvg_4h_zone_active",
@@ -90,6 +135,9 @@ RENAME_TO_MODEL = {
     "CSV_ob_4h_distance_pips": "ob_4h_distance_pips",
     "CSV_fvg_4h_fill_ratio": "fvg_4h_fill_ratio",
     "CSV_liq_sweep_strength": "liq_sweep_strength",
+    "CSV_fvg_4h_size_pips": "fvg_4h_size_pips",
+    "CSV_ob_4h_size_pips": "ob_4h_size_pips",
+    "CSV_sweep_depth_atr_ratio": "sweep_depth_atr_ratio",
     "CSV_prior_candle_body_ratio": "prior_candle_body_ratio",
     "CSV_consecutive_same_dir": "consecutive_same_dir",
     "CSV_sweep_pending_bars": "sweep_pending_bars",
@@ -119,6 +167,7 @@ def _calc_sl_tp_pips(atr_value: float, pair: str) -> tuple[float, float]:
     sl_multiplier = 1.5
     sl_min_pips = 15.0
     sl_max_pips = 35.0
+    sl_cap_atr_multiplier = 1.0
     tp_min_ratio = 1.5
 
     if pair in ("USDJPY", "GBPJPY"):
@@ -126,7 +175,12 @@ def _calc_sl_tp_pips(atr_value: float, pair: str) -> tuple[float, float]:
     else:
         atr_pips = atr_value * 10000
 
-    sl_pips = max(sl_min_pips, min(atr_pips * sl_multiplier, sl_max_pips))
+    if sl_cap_atr_multiplier > 0:
+        sl_upper_cap = max(sl_min_pips, atr_pips * sl_cap_atr_multiplier)
+    else:
+        sl_upper_cap = sl_max_pips
+
+    sl_pips = max(sl_min_pips, min(atr_pips * sl_multiplier, sl_upper_cap))
     tp_pips = max(sl_pips * tp_min_ratio, sl_pips * 1.5)
     return sl_pips, tp_pips
 
@@ -195,9 +249,18 @@ def _day_of_week_from_timestamp(ts: pd.Timestamp) -> int:
 def build_dataset(input_path: Path, output_path: Path, pair: str, horizon_bars: int) -> pd.DataFrame:
     df = pd.read_csv(input_path)
 
-    missing = [c for c in FEATURE_COLS + ["CSV_direction", "CSV_close_price"] if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+    missing_required = [c for c in REQUIRED_BASE_COLS + ["CSV_direction", "CSV_close_price"] if c not in df.columns]
+    if missing_required:
+        raise ValueError(f"Missing required columns: {missing_required}")
+
+    for col, default_value in OPTIONAL_NEW_COLS_WITH_DEFAULT.items():
+        if col not in df.columns:
+            warnings.warn(
+                f"{input_path}: optional column '{col}' not found. filling default={default_value}.",
+                UserWarning,
+                stacklevel=2,
+            )
+            df[col] = default_value
 
     if "high" not in df.columns or "low" not in df.columns:
         warnings.warn(

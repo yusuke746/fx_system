@@ -1,7 +1,7 @@
 """
 LightGBM 特徴量エンジニアリング・推論モジュール
 
-■ 35特徴量（MTF SMC v2.3 センサー拡張版）
+■ 38特徴量（MTF SMC v2.3 センサー拡張版）
 
     SMCフラグ(8): fvg_4h_zone_active, ob_4h_zone_active, liq_sweep_1h,
                                  liq_sweep_qualified, bos_1h, choch_1h,
@@ -11,9 +11,11 @@ LightGBM 特徴量エンジニアリング・推論モジュール
     トレンド・モメンタム補助(3): trend_direction, momentum_long, momentum_short
     モメンタム系(7): macd_histogram, macd_signal_cross, rsi_14, rsi_zone,
                                  stoch_k, stoch_d, momentum_3bar
-  構造・パターン系(6): ob_4h_distance_pips, fvg_4h_fill_ratio,
-                 liq_sweep_strength, prior_candle_body_ratio,
-                 consecutive_same_dir, sweep_pending_bars
+    構造・パターン系(9): ob_4h_distance_pips, fvg_4h_fill_ratio,
+                                 liq_sweep_strength, fvg_4h_size_pips,
+                                 ob_4h_size_pips, sweep_depth_atr_ratio,
+                                 prior_candle_body_ratio, consecutive_same_dir,
+                                 sweep_pending_bars
   リスク・ポジション系(4): open_positions_count, max_dd_24h,
                  calendar_risk_score, sentiment_score
   セッション補助(2): session_type, day_of_week
@@ -61,10 +63,13 @@ FEATURE_NAMES = [
     "stoch_k",
     "stoch_d",
     "momentum_3bar",
-    # 構造・パターン系 (6) ← pivot_proximityを削除
+    # 構造・パターン系 (9) ← pivot_proximityを削除
     "ob_4h_distance_pips",
     "fvg_4h_fill_ratio",
     "liq_sweep_strength",
+    "fvg_4h_size_pips",
+    "ob_4h_size_pips",
+    "sweep_depth_atr_ratio",
     "prior_candle_body_ratio",
     "consecutive_same_dir",
     "sweep_pending_bars",
@@ -78,7 +83,7 @@ FEATURE_NAMES = [
     "day_of_week",
 ]
 
-assert len(FEATURE_NAMES) == 35, f"Expected 35 features, got {len(FEATURE_NAMES)}"
+assert len(FEATURE_NAMES) == 38, f"Expected 38 features, got {len(FEATURE_NAMES)}"
 
 # LightGBM 学習パラメータ（設計書 確定値）
 LGBM_PARAMS = {
@@ -137,9 +142,9 @@ class PredictionResult:
             direction_threshold = 0.40
             block_threshold = 0.45
         else:
-            # 精度低（USDJPY相当）: Pineシグナルを最大限尊重
-            direction_threshold = 0.35
-            block_threshold = 0.50
+            # 精度低: フィルターを強化してノイズ通過を抑制
+            direction_threshold = 0.45
+            block_threshold = 0.40
 
         # AND 条件: direction確率が高い かつ 逆方向確率が低い
         if signal_direction == "long":
@@ -163,7 +168,7 @@ def build_features(
     day_of_week: int = 0,
 ) -> np.ndarray:
     """
-    35特徴量ベクトルを構築する。
+    38特徴量ベクトルを構築する。
 
     Args:
         smc_data: TradingView Webhook から受け取った SMC データ
@@ -175,7 +180,7 @@ def build_features(
         day_of_week: 曜日 (0=月, ..., 6=日)
 
     Returns:
-        shape=(1, 35) の numpy 配列
+        shape=(1, 38) の numpy 配列
     """
     features = [
         # SMC フラグ (8)
@@ -205,10 +210,13 @@ def build_features(
         market_data.get("stoch_k", 50.0),
         market_data.get("stoch_d", 50.0),
         market_data.get("momentum_3bar", 0.0),
-        # 構造・パターン系 (6) ← pivot_proximityを削除
+        # 構造・パターン系 (9) ← pivot_proximityを削除
         market_data.get("ob_4h_distance_pips", 0.0),
         market_data.get("fvg_4h_fill_ratio", 0.0),
         market_data.get("liq_sweep_strength", 0.0),
+        market_data.get("fvg_4h_size_pips", 0.0),
+        market_data.get("ob_4h_size_pips", 0.0),
+        market_data.get("sweep_depth_atr_ratio", 0.0),
         market_data.get("prior_candle_body_ratio", 0.5),
         market_data.get("consecutive_same_dir", 0),
         smc_data.get("sweep_pending_bars", 0),              # [NEW v2.3]

@@ -159,6 +159,7 @@ def calc_sl_tp_pips(
     sl_mult = risk["sl_multiplier"]
     sl_min = risk["sl_min_pips"]
     sl_max = risk["sl_max_pips"]
+    sl_cap_atr_multiplier = float(risk.get("sl_cap_atr_multiplier", 1.0))
 
     # ATR → pips変換（USDJPY/GBPJPY は 0.01=1pip, EURUSD は 0.0001=1pip）
     if pair in ("USDJPY", "GBPJPY"):
@@ -166,7 +167,12 @@ def calc_sl_tp_pips(
     else:
         atr_pips = atr * 10000
 
-    sl_pips = max(sl_min, min(atr_pips * sl_mult, sl_max))
+    if sl_cap_atr_multiplier > 0:
+        sl_upper_cap = max(sl_min, atr_pips * sl_cap_atr_multiplier)
+    else:
+        sl_upper_cap = sl_max
+
+    sl_pips = max(sl_min, min(atr_pips * sl_mult, sl_upper_cap))
 
     tp_min_rr = 1.5  # R:R最低保証（SLの1.5倍）
     tp_rr_floor = sl_pips * tp_min_rr
@@ -186,6 +192,7 @@ def calc_sl_tp_pips(
         )
         tp_candidate = tp_rr_floor
 
-    tp_pips = round(min(tp_candidate, sl_max * 3.0), 1)
+    tp_cap = max(tp_rr_floor, sl_upper_cap * 3.0)
+    tp_pips = round(min(tp_candidate, tp_cap), 1)
 
     return round(sl_pips, 1), tp_pips

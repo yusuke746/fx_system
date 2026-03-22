@@ -168,7 +168,10 @@ class Orchestrator:
         }
         for pair, acc in _default_accuracies.items():
             metrics = load_model_metrics(pair, self._settings.model_dir)
-            selected_acc = float(metrics.get("accuracy", acc)) if metrics else acc
+            if metrics:
+                selected_acc = float(metrics.get("balanced_accuracy", metrics.get("accuracy", acc)))
+            else:
+                selected_acc = acc
             self._predictor.set_model_accuracy(pair, selected_acc)
 
         # MT5 側に残っている建玉をローカル管理へ復元
@@ -458,6 +461,9 @@ class Orchestrator:
                 "ob_4h_distance_pips": payload.get("ob_4h_distance_pips", 0.0),
                 "fvg_4h_fill_ratio": payload.get("fvg_4h_fill_ratio", 0.0),
                 "liq_sweep_strength": payload.get("liq_sweep_strength", 0.0),
+                "fvg_4h_size_pips": payload.get("fvg_4h_size_pips", 0.0),
+                "ob_4h_size_pips": payload.get("ob_4h_size_pips", 0.0),
+                "sweep_depth_atr_ratio": payload.get("sweep_depth_atr_ratio", 0.0),
                 "prior_candle_body_ratio": payload.get("prior_candle_body_ratio", 0.5),
                 "consecutive_same_dir": payload.get("consecutive_same_dir", 0),
                 "sweep_pending_bars": payload.get("sweep_pending_bars", 0),
@@ -595,10 +601,14 @@ class Orchestrator:
                     tp_swing_pips=payload.get("tp_swing_pips", 0.0),
                     tp_fvg_pips=payload.get("tp_fvg_pips", 0.0),
                 )
-                lot = calc_lot_size(
-                    self._broker.get_account_balance(),
-                    sl_pips, pair, self._risk_config,
-                )
+                risk_cfg = config.get("risk", {})
+                if bool(risk_cfg.get("demo_fixed_lot_enabled", False)):
+                    lot = float(risk_cfg.get("demo_fixed_lot", 0.01))
+                else:
+                    lot = calc_lot_size(
+                        self._broker.get_account_balance(),
+                        sl_pips, pair, self._risk_config,
+                    )
                 ok, new_ticket, sl_price, tp_price = await self._position_manager.execute_doten(
                     pair, pos.ticket, direction,
                     lot, sl_pips, tp_pips, close_price,
@@ -668,10 +678,14 @@ class Orchestrator:
             tp_swing_pips=payload.get("tp_swing_pips", 0.0),
             tp_fvg_pips=payload.get("tp_fvg_pips", 0.0),
         )
-        lot = calc_lot_size(
-            self._broker.get_account_balance(),
-            sl_pips, pair, self._risk_config,
-        )
+        risk_cfg = config.get("risk", {})
+        if bool(risk_cfg.get("demo_fixed_lot_enabled", False)):
+            lot = float(risk_cfg.get("demo_fixed_lot", 0.01))
+        else:
+            lot = calc_lot_size(
+                self._broker.get_account_balance(),
+                sl_pips, pair, self._risk_config,
+            )
         sl_price, tp_price = self._calc_sl_tp_price(
             pair, direction, close_price, sl_pips, tp_pips,
         )
@@ -886,7 +900,7 @@ class Orchestrator:
         # 週次再学習後にWFV精度を更新
         validation = retrain_result.get("retrain", {}).get("validation", {})
         for _pair, val_result in validation.items():
-            acc = float(val_result.get("accuracy", 0.0))
+            acc = float(val_result.get("balanced_accuracy", val_result.get("accuracy", 0.0)))
             if acc > 0:
                 self._predictor.set_model_accuracy(_pair, acc)
                 logger.info(f"Model accuracy updated after retraining: {_pair}={acc:.4f}")

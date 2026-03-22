@@ -89,6 +89,9 @@ def _ensure_schema_compat(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "training_samples", "session_type", "INTEGER")
     _ensure_column(conn, "training_samples", "day_of_week", "INTEGER")
     _ensure_column(conn, "training_samples", "tp_distance_pips", "REAL")
+    _ensure_column(conn, "training_samples", "fvg_4h_size_pips", "REAL")
+    _ensure_column(conn, "training_samples", "ob_4h_size_pips", "REAL")
+    _ensure_column(conn, "training_samples", "sweep_depth_atr_ratio", "REAL")
 
 
 def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_type_sql: str) -> None:
@@ -203,6 +206,9 @@ CREATE TABLE IF NOT EXISTS training_samples (
     ob_4h_distance_pips      REAL,
     fvg_4h_fill_ratio        REAL,
     liq_sweep_strength       REAL,
+    fvg_4h_size_pips         REAL,
+    ob_4h_size_pips          REAL,
+    sweep_depth_atr_ratio    REAL,
     prior_candle_body_ratio  REAL,
     consecutive_same_dir     INTEGER,
     pivot_proximity          REAL,
@@ -396,7 +402,7 @@ def check_integrity(conn: sqlite3.Connection) -> bool:
 
 
 def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
-    """学習用サンプル（特徴量35個）を保存する。"""
+    """学習用サンプル（特徴量38個）を保存する。"""
     cur = _execute_with_retry(
         conn,
         """INSERT INTO training_samples (
@@ -409,6 +415,7 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
            macd_histogram, macd_signal_cross, rsi_14, rsi_zone,
            stoch_k, stoch_d, momentum_3bar,
            ob_4h_distance_pips, fvg_4h_fill_ratio, liq_sweep_strength,
+              fvg_4h_size_pips, ob_4h_size_pips, sweep_depth_atr_ratio,
            prior_candle_body_ratio, consecutive_same_dir,
               sweep_pending_bars,
               open_positions_count, max_dd_24h, calendar_risk_score, sentiment_score,
@@ -424,6 +431,7 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
            ?, ?, ?, ?,
            ?, ?, ?,
            ?, ?, ?,
+              ?, ?, ?,
            ?, ?,
               ?,
               ?, ?, ?, ?,
@@ -462,6 +470,9 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
             sample.get("ob_4h_distance_pips", 0.0),
             sample.get("fvg_4h_fill_ratio", 0.0),
             sample.get("liq_sweep_strength", 0.0),
+            sample.get("fvg_4h_size_pips", 0.0),
+            sample.get("ob_4h_size_pips", 0.0),
+            sample.get("sweep_depth_atr_ratio", 0.0),
             sample.get("prior_candle_body_ratio", 0.5),
             sample.get("consecutive_same_dir", 0),
             sample.get("sweep_pending_bars", 0),
