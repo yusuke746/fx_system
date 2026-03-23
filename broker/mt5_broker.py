@@ -104,6 +104,8 @@ class MT5Broker:
         if not MT5_AVAILABLE:
             return 0.0
         info = mt5.account_info()
+        if info is None:
+            logger.warning(f"MT5 account_info() returned None while reading balance: last_error={mt5.last_error()}")
         return info.balance if info else 0.0
 
     def get_account_equity(self) -> float:
@@ -111,7 +113,25 @@ class MT5Broker:
         if not MT5_AVAILABLE:
             return 0.0
         info = mt5.account_info()
+        if info is None:
+            logger.warning(f"MT5 account_info() returned None while reading equity: last_error={mt5.last_error()}")
         return info.equity if info else 0.0
+
+    def _ensure_symbol_ready(self, pair: str):
+        """発注前に銘柄情報を取得し、必要ならMarket Watchへ追加する。"""
+        info = mt5.symbol_info(pair)
+        if info is None:
+            logger.error(f"MT5 symbol_info() returned None for {pair}: last_error={mt5.last_error()}")
+            return None
+
+        if not getattr(info, "visible", True):
+            selected = mt5.symbol_select(pair, True)
+            if not selected:
+                logger.error(f"MT5 symbol_select() failed for {pair}: last_error={mt5.last_error()}")
+                return None
+            info = mt5.symbol_info(pair)
+
+        return info
 
     # ── ポジション ───────────────────────────────
     def get_positions(self, pair: str | None = None) -> list[dict]:
@@ -239,9 +259,16 @@ class MT5Broker:
             return False, None, 0.0, 0.0
 
         order_type = mt5.ORDER_TYPE_BUY if direction == "long" else mt5.ORDER_TYPE_SELL
+        info = self._ensure_symbol_ready(pair)
+        if info is None:
+            return False, None, 0.0, 0.0
+
         tick = mt5.symbol_info_tick(pair)
         if tick is None:
-            logger.error(f"Cannot get tick for {pair}")
+            logger.error(
+                f"Cannot get tick for {pair}: visible={getattr(info, 'visible', None)}, "
+                f"trade_mode={getattr(info, 'trade_mode', None)}, last_error={mt5.last_error()}"
+            )
             return False, None, 0.0, 0.0
 
         price = tick.ask if direction == "long" else tick.bid
@@ -251,7 +278,6 @@ class MT5Broker:
 
         # ブローカーの最小ストップ距離（ポイント単位）を強制する
         # 環境によって stops_level / trade_stops_level のどちらかになるため両対応する。
-        info = mt5.symbol_info(pair)
         stops_level = 0
         point = 0.0
         if info is not None:
