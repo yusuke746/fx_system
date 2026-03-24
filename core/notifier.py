@@ -16,6 +16,7 @@ from core.time_manager import format_jst, now_utc
 
 class AlertLevel(Enum):
     INFO = "info"
+    WARNING = "warning"
     ALERT = "alert"
     CRITICAL = "critical"
 
@@ -35,6 +36,7 @@ class DiscordNotifier:
         timestamp_jst = format_jst(now_utc())
         prefix = {
             AlertLevel.INFO: ":information_source:",
+            AlertLevel.WARNING: ":warning:",
             AlertLevel.ALERT: ":warning:",
             AlertLevel.CRITICAL: ":rotating_light: **CRITICAL**",
         }[level]

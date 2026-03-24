@@ -1,0 +1,259 @@
+{
+  "generated_at_utc": "2026-03-24T11:53:53.894697+00:00",
+  "pairs": [
+    "USDJPY",
+    "EURUSD",
+    "GBPJPY"
+  ],
+  "horizons": [
+    4,
+    6,
+    8,
+    12,
+    16
+  ],
+  "results": {
+    "USDJPY": [
+      {
+        "pair": "USDJPY",
+        "horizon_bars": 4,
+        "horizon_minutes": 60,
+        "n_folds": 17,
+        "avg_accuracy": 0.532844,
+        "avg_balanced_accuracy": 0.447597,
+        "avg_majority_baseline": 0.655873,
+        "avg_proxy_pips_per_signal": -0.138548,
+        "avg_proxy_pips_per_trade": -0.095988,
+        "avg_trade_rate": 0.47417,
+        "total_val_samples": 4399
+      },
+      {
+        "pair": "USDJPY",
+        "horizon_bars": 6,
+        "horizon_minutes": 90,
+        "n_folds": 17,
+        "avg_accuracy": 0.488975,
+        "avg_balanced_accuracy": 0.442829,
+        "avg_majority_baseline": 0.52405,
+        "avg_proxy_pips_per_signal": 0.915863,
+        "avg_proxy_pips_per_trade": 1.643247,
+        "avg_trade_rate": 0.549544,
+        "total_val_samples": 4399
+      },
+      {
+        "pair": "USDJPY",
+        "horizon_bars": 8,
+        "horizon_minutes": 120,
+        "n_folds": 17,
+        "avg_accuracy": 0.461186,
+        "avg_balanced_accuracy": 0.442891,
+        "avg_majority_baseline": 0.464293,
+        "avg_proxy_pips_per_signal": 1.034792,
+        "avg_proxy_pips_per_trade": 1.977723,
+        "avg_trade_rate": 0.612333,
+        "total_val_samples": 4399
+      },
+      {
+        "pair": "USDJPY",
+        "horizon_bars": 12,
+        "horizon_minutes": 180,
+        "n_folds": 17,
+        "avg_accuracy": 0.439886,
+        "avg_balanced_accuracy": 0.430882,
+        "avg_majority_baseline": 0.423671,
+        "avg_proxy_pips_per_signal": 1.668457,
+        "avg_proxy_pips_per_trade": 2.019625,
+        "avg_trade_rate": 0.711283,
+        "total_val_samples": 4399
+      },
+      {
+        "pair": "USDJPY",
+        "horizon_bars": 16,
+        "horizon_minutes": 240,
+        "n_folds": 17,
+        "avg_accuracy": 0.440478,
+        "avg_balanced_accuracy": 0.414868,
+        "avg_majority_baseline": 0.443301,
+        "avg_proxy_pips_per_signal": 3.366651,
+        "avg_proxy_pips_per_trade": 4.081447,
+        "avg_trade_rate": 0.783737,
+        "total_val_samples": 4399
+      }
+    ],
+    "EURUSD": [
+      {
+        "pair": "EURUSD",
+        "horizon_bars": 4,
+        "horizon_minutes": 60,
+        "n_folds": 17,
+        "avg_accuracy": 0.635254,
+        "avg_balanced_accuracy": 0.433366,
+        "avg_majority_baseline": 0.828678,
+        "avg_proxy_pips_per_signal": 0.138745,
+        "avg_proxy_pips_per_trade": 0.296087,
+        "avg_trade_rate": 0.346027,
+        "total_val_samples": 4138
+      },
+      {
+        "pair": "EURUSD",
+        "horizon_bars": 6,
+        "horizon_minutes": 90,
+        "n_folds": 17,
+        "avg_accuracy": 0.562084,
+        "avg_balanced_accuracy": 0.442105,
+        "avg_majority_baseline": 0.731867,
+        "avg_proxy_pips_per_signal": 0.256773,
+        "avg_proxy_pips_per_trade": 0.521368,
+        "avg_trade_rate": 0.42956,
+        "total_val_samples": 4138
+      },
+      {
+        "pair": "EURUSD",
+        "horizon_bars": 8,
+        "horizon_minutes": 120,
+        "n_folds": 17,
+        "avg_accuracy": 0.534779,
+        "avg_balanced_accuracy": 0.451359,
+        "avg_majority_baseline": 0.655033,
+        "avg_proxy_pips_per_signal": 0.051797,
+        "avg_proxy_pips_per_trade": 0.214254,
+        "avg_trade_rate": 0.468486,
+        "total_val_samples": 4138
+      },
+      {
+        "pair": "EURUSD",
+        "horizon_bars": 12,
+        "horizon_minutes": 180,
+        "n_folds": 17,
+        "avg_accuracy": 0.499083,
+        "avg_balanced_accuracy": 0.466511,
+        "avg_majority_baseline": 0.543035,
+        "avg_proxy_pips_per_signal": 0.207371,
+        "avg_proxy_pips_per_trade": 0.282211,
+        "avg_trade_rate": 0.555631,
+        "total_val_samples": 4138
+      },
+      {
+        "pair": "EURUSD",
+        "horizon_bars": 16,
+        "horizon_minutes": 240,
+        "n_folds": 17,
+        "avg_accuracy": 0.486864,
+        "avg_balanced_accuracy": 0.475211,
+        "avg_majority_baseline": 0.483843,
+        "avg_proxy_pips_per_signal": 1.438294,
+        "avg_proxy_pips_per_trade": 2.202787,
+        "avg_trade_rate": 0.626943,
+        "total_val_samples": 4138
+      }
+    ],
+    "GBPJPY": [
+      {
+        "pair": "GBPJPY",
+        "horizon_bars": 4,
+        "horizon_minutes": 60,
+        "n_folds": 17,
+        "avg_accuracy": 0.469761,
+        "avg_balanced_accuracy": 0.460941,
+        "avg_majority_baseline": 0.531797,
+        "avg_proxy_pips_per_signal": 0.90131,
+        "avg_proxy_pips_per_trade": 1.579975,
+        "avg_trade_rate": 0.642299,
+        "total_val_samples": 4553
+      },
+      {
+        "pair": "GBPJPY",
+        "horizon_bars": 6,
+        "horizon_minutes": 90,
+        "n_folds": 17,
+        "avg_accuracy": 0.468209,
+        "avg_balanced_accuracy": 0.462166,
+        "avg_majority_baseline": 0.408525,
+        "avg_proxy_pips_per_signal": 2.959482,
+        "avg_proxy_pips_per_trade": 4.58207,
+        "avg_trade_rate": 0.693032,
+        "total_val_samples": 4553
+      },
+      {
+        "pair": "GBPJPY",
+        "horizon_bars": 8,
+        "horizon_minutes": 120,
+        "n_folds": 17,
+        "avg_accuracy": 0.458212,
+        "avg_balanced_accuracy": 0.44899,
+        "avg_majority_baseline": 0.395882,
+        "avg_proxy_pips_per_signal": 2.360785,
+        "avg_proxy_pips_per_trade": 3.467985,
+        "avg_trade_rate": 0.733939,
+        "total_val_samples": 4553
+      },
+      {
+        "pair": "GBPJPY",
+        "horizon_bars": 12,
+        "horizon_minutes": 180,
+        "n_folds": 17,
+        "avg_accuracy": 0.481472,
+        "avg_balanced_accuracy": 0.455822,
+        "avg_majority_baseline": 0.447979,
+        "avg_proxy_pips_per_signal": 4.157748,
+        "avg_proxy_pips_per_trade": 5.535476,
+        "avg_trade_rate": 0.804528,
+        "total_val_samples": 4553
+      },
+      {
+        "pair": "GBPJPY",
+        "horizon_bars": 16,
+        "horizon_minutes": 240,
+        "n_folds": 17,
+        "avg_accuracy": 0.509449,
+        "avg_balanced_accuracy": 0.474001,
+        "avg_majority_baseline": 0.484274,
+        "avg_proxy_pips_per_signal": 5.428752,
+        "avg_proxy_pips_per_trade": 6.735372,
+        "avg_trade_rate": 0.851887,
+        "total_val_samples": 4553
+      }
+    ]
+  },
+  "best": {
+    "USDJPY": {
+      "pair": "USDJPY",
+      "horizon_bars": 16,
+      "horizon_minutes": 240,
+      "n_folds": 17,
+      "avg_accuracy": 0.440478,
+      "avg_balanced_accuracy": 0.414868,
+      "avg_majority_baseline": 0.443301,
+      "avg_proxy_pips_per_signal": 3.366651,
+      "avg_proxy_pips_per_trade": 4.081447,
+      "avg_trade_rate": 0.783737,
+      "total_val_samples": 4399
+    },
+    "EURUSD": {
+      "pair": "EURUSD",
+      "horizon_bars": 16,
+      "horizon_minutes": 240,
+      "n_folds": 17,
+      "avg_accuracy": 0.486864,
+      "avg_balanced_accuracy": 0.475211,
+      "avg_majority_baseline": 0.483843,
+      "avg_proxy_pips_per_signal": 1.438294,
+      "avg_proxy_pips_per_trade": 2.202787,
+      "avg_trade_rate": 0.626943,
+      "total_val_samples": 4138
+    },
+    "GBPJPY": {
+      "pair": "GBPJPY",
+      "horizon_bars": 16,
+      "horizon_minutes": 240,
+      "n_folds": 17,
+      "avg_accuracy": 0.509449,
+      "avg_balanced_accuracy": 0.474001,
+      "avg_majority_baseline": 0.484274,
+      "avg_proxy_pips_per_signal": 5.428752,
+      "avg_proxy_pips_per_trade": 6.735372,
+      "avg_trade_rate": 0.851887,
+      "total_val_samples": 4553
+    }
+  }
+}

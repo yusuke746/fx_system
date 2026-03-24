@@ -231,8 +231,15 @@ class PositionManager:
         if elapsed < min_minutes:
             return False
 
-        min_profit_atr = float(risk.get("time_decay_min_profit_atr", 0.5))
+        # time_decay は「伸びない負け/建値付近の停滞」を切る用途に限定する。
+        # ATR × hold_threshold 以上の含み益があれば保持（建値前後の停滞は切る対象）。
         current_profit = self._price_move_in_favor(pos, current_price)
+        if bool(risk.get("time_decay_only_on_loser", True)):
+            hold_atr = float(risk.get("time_decay_hold_atr_threshold", 0.15))
+            if current_profit >= pos.atr_at_entry * hold_atr:
+                return False
+
+        min_profit_atr = float(risk.get("time_decay_min_profit_atr", 0.5))
         required_profit = pos.atr_at_entry * min_profit_atr
         return current_profit < required_profit
 

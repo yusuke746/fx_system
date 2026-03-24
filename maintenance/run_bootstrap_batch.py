@@ -126,6 +126,7 @@ def main() -> None:
                 continue
 
             wfv_acc = None
+            val = None
             if not args.skip_wfv:
                 val = walk_forward_validate(X, y, signal_times=signal_times, pair=pair)
                 wfv_acc = float(val.get("accuracy", 0.0))

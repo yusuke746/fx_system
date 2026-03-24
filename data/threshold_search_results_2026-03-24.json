@@ -1,0 +1,150 @@
+{
+  "generated_at_utc": "2026-03-24T13:15:14.145781+00:00",
+  "pairs": [
+    "USDJPY",
+    "EURUSD",
+    "GBPJPY"
+  ],
+  "report": {
+    "USDJPY": {
+      "baseline": {
+        "dt_long": 0.35,
+        "bt_long": 0.5,
+        "dt_short": 0.45,
+        "bt_short": 0.4,
+        "pips_per_signal": 2.2032941176470664,
+        "pips_per_trade": 3.131772575250847,
+        "trade_rate": 0.7035294117647058,
+        "n_trades": 1495,
+        "n_samples": 2125,
+        "thresholds": {
+          "long": {
+            "direction_threshold": 0.35,
+            "block_threshold": 0.5
+          },
+          "short": {
+            "direction_threshold": 0.45,
+            "block_threshold": 0.4
+          }
+        }
+      },
+      "best": {
+        "dt_long": 0.35,
+        "bt_long": 0.5,
+        "dt_short": 0.45,
+        "bt_short": 0.4,
+        "pips_per_signal": 2.2032941176470664,
+        "pips_per_trade": 3.131772575250847,
+        "trade_rate": 0.7035294117647058,
+        "n_trades": 1495,
+        "n_samples": 2125,
+        "improvement_pips_per_signal": 0.0,
+        "improvement_pips_per_trade": 0.0
+      }
+    },
+    "EURUSD": {
+      "baseline": {
+        "dt_long": 0.55,
+        "bt_long": 0.4,
+        "dt_short": 0.35,
+        "bt_short": 0.45,
+        "pips_per_signal": -0.5915553180117634,
+        "pips_per_trade": -1.128236493374118,
+        "trade_rate": 0.5243185462319615,
+        "n_trades": 981,
+        "n_samples": 1871,
+        "thresholds": {
+          "long": {
+            "direction_threshold": 0.55,
+            "block_threshold": 0.4
+          },
+          "short": {
+            "direction_threshold": 0.35,
+            "block_threshold": 0.45
+          }
+        }
+      },
+      "best": {
+        "dt_long": 0.65,
+        "bt_long": 0.3,
+        "dt_short": 0.35,
+        "bt_short": 0.45,
+        "pips_per_signal": 0.8955638695884492,
+        "pips_per_trade": 2.134522292993616,
+        "trade_rate": 0.4195617316942811,
+        "n_trades": 785,
+        "n_samples": 1871,
+        "improvement_pips_per_signal": 1.4871191876002126,
+        "improvement_pips_per_trade": 3.2627587863677343
+      }
+    },
+    "GBPJPY": {
+      "baseline": {
+        "dt_long": 0.4,
+        "bt_long": 0.5,
+        "dt_short": 0.45,
+        "bt_short": 0.4,
+        "pips_per_signal": 6.278432260987748,
+        "pips_per_trade": 8.792195431472058,
+        "trade_rate": 0.7140915269596738,
+        "n_trades": 1576,
+        "n_samples": 2207,
+        "thresholds": {
+          "long": {
+            "direction_threshold": 0.4,
+            "block_threshold": 0.5
+          },
+          "short": {
+            "direction_threshold": 0.45,
+            "block_threshold": 0.4
+          }
+        }
+      },
+      "best": {
+        "dt_long": 0.4,
+        "bt_long": 0.5,
+        "dt_short": 0.45,
+        "bt_short": 0.4,
+        "pips_per_signal": 6.278432260987748,
+        "pips_per_trade": 8.792195431472058,
+        "trade_rate": 0.7140915269596738,
+        "n_trades": 1576,
+        "n_samples": 2207,
+        "improvement_pips_per_signal": 0.0,
+        "improvement_pips_per_trade": 0.0
+      }
+    }
+  },
+  "recommended_thresholds": {
+    "USDJPY": {
+      "long": {
+        "direction_threshold": 0.35,
+        "block_threshold": 0.5
+      },
+      "short": {
+        "direction_threshold": 0.45,
+        "block_threshold": 0.4
+      }
+    },
+    "EURUSD": {
+      "long": {
+        "direction_threshold": 0.65,
+        "block_threshold": 0.3
+      },
+      "short": {
+        "direction_threshold": 0.35,
+        "block_threshold": 0.45
+      }
+    },
+    "GBPJPY": {
+      "long": {
+        "direction_threshold": 0.4,
+        "block_threshold": 0.5
+      },
+      "short": {
+        "direction_threshold": 0.45,
+        "block_threshold": 0.4
+      }
+    }
+  }
+}

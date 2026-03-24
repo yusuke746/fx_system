@@ -24,7 +24,7 @@ import asyncio
 import signal
 import sys
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -174,6 +174,9 @@ class Orchestrator:
                 selected_acc = acc
             self._predictor.set_model_accuracy(pair, selected_acc)
 
+        # 再起動中に broker 側で消えた建玉を、可能な範囲でDBへクローズ反映する。
+        self._reconcile_stale_db_trades_with_broker()
+
         # MT5 側に残っている建玉をローカル管理へ復元
         self._restore_managed_positions_from_broker()
 
@@ -308,6 +311,100 @@ class Orchestrator:
         if restored > 0:
             logger.warning(f"Recovered {restored} broker positions into local manager state")
 
+    def _reconcile_stale_db_trades_with_broker(self) -> None:
+        """DBでは未決済だが、broker側に存在しない建玉を起動時に整合させる。"""
+        broker_positions = self._broker.get_positions()
+        broker_open_tickets = {int(pos["ticket"]) for pos in broker_positions}
+        rows = self._db_conn.execute(
+            "SELECT * FROM trades WHERE close_time IS NULL ORDER BY open_time"
+        ).fetchall()
+
+        reconciled = 0
+        unresolved = 0
+
+        for row in rows:
+            ticket = int(row["mt5_ticket"] or 0)
+            if ticket <= 0 or ticket in broker_open_tickets:
+                continue
+
+            open_time = row["open_time"]
+            opened_at = now_utc()
+            if isinstance(open_time, str):
+                try:
+                    opened_at = datetime.fromisoformat(open_time)
+                except ValueError:
+                    opened_at = now_utc()
+            if opened_at.tzinfo is None:
+                opened_at = opened_at.replace(tzinfo=UTC)
+
+            lookback_hours = max(72, int((now_utc() - opened_at).total_seconds() // 3600) + 24)
+            closed_info = self._broker.get_recent_closed_position_info(
+                ticket,
+                lookback_hours=lookback_hours,
+            )
+            if not closed_info or not closed_info.get("close_price"):
+                unresolved += 1
+                continue
+
+            close_price = float(closed_info["close_price"])
+            pnl_pips, pnl_jpy = self._estimate_closed_trade_metrics(dict(row), close_price)
+            profit = closed_info.get("profit")
+            if profit is not None:
+                pnl_jpy = round(float(profit), 0)
+
+            close_trade(
+                self._db_conn,
+                trade_id=int(row["id"]),
+                close_price=close_price,
+                pnl_pips=pnl_pips,
+                pnl_jpy=pnl_jpy,
+                exit_reason=self._infer_exit_reason_from_trade_row(dict(row), close_price),
+            )
+            reconciled += 1
+
+        if reconciled > 0 or unresolved > 0:
+            logger.warning(
+                "Startup DB reconciliation: "
+                f"reconciled={reconciled}, unresolved={unresolved}, broker_open={len(broker_open_tickets)}"
+            )
+
+    def _infer_exit_reason_from_trade_row(self, trade_row: dict, close_price: float) -> str:
+        """DB行だけから外部決済の exit_reason を近似推定する。"""
+        pair = str(trade_row.get("pair") or "")
+        direction = str(trade_row.get("direction") or "")
+        open_price = float(trade_row.get("open_price") or 0.0)
+        sl_price = float(trade_row.get("sl_price") or 0.0)
+        tp_price = float(trade_row.get("tp_price") or 0.0)
+        tolerance = 1e-5 if pair not in ("USDJPY", "GBPJPY") else 1e-3
+
+        if tp_price > 0:
+            if direction == "long" and close_price >= tp_price - tolerance:
+                return "structural_tp"
+            if direction == "short" and close_price <= tp_price + tolerance:
+                return "structural_tp"
+
+        if sl_price > 0:
+            if direction == "long" and close_price <= sl_price + tolerance:
+                return "trailing" if sl_price >= open_price else "atr_sl"
+            if direction == "short" and close_price >= sl_price - tolerance:
+                return "trailing" if sl_price <= open_price else "atr_sl"
+
+        return "time_exit"
+
+    def _estimate_closed_trade_metrics(self, trade_row: dict, close_price: float) -> tuple[float, float]:
+        """DB行から決済時の概算 pips / 円損益を求める。"""
+        pair = str(trade_row.get("pair") or "")
+        direction = str(trade_row.get("direction") or "")
+        open_price = float(trade_row.get("open_price") or 0.0)
+        volume = float(trade_row.get("volume") or 0.0)
+        pip_unit = 0.01 if pair in ("USDJPY", "GBPJPY") else 0.0001
+
+        pnl_price = (close_price - open_price) if direction == "long" else (open_price - close_price)
+        pnl_pips = pnl_price / pip_unit
+        pip_value_per_mini_lot = 100 if pair in ("USDJPY", "GBPJPY") else 110
+        pnl_jpy = pnl_pips * pip_value_per_mini_lot * (volume / 0.01)
+        return round(pnl_pips, 1), round(pnl_jpy, 0)
+
     # ── メインシグナル処理ループ ──────────────────
     async def _signal_processing_loop(self) -> None:
         """Webhook キューからシグナルを受け取って処理するメインループ。"""
@@ -366,8 +463,10 @@ class Orchestrator:
                 "executed": False,
                 "veto_reason": veto_reason,
             })
-            # Veto中は全ポジション強制クローズ + SL→BE
-            await self._position_manager.close_all_positions(reason="calendar_veto")
+            # 高インパクト指標中は新規シグナルだけ拒否する。
+            # 既存ポジションの即時全決済は損失を固定化しやすいため、設定時のみ有効化する。
+            if bool(self._config.get("risk", {}).get("calendar_veto_force_close", False)):
+                await self._position_manager.close_all_positions(reason="calendar_veto")
             return
 
         # ③ GPT-5.2 キャッシュ読込（Veto Layer B）

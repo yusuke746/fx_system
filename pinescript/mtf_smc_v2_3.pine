@@ -13,6 +13,8 @@
 //   [4] OBミティゲーション: ゾーン中央突破で使用済みフラグ (ob_4h_valid)
 //   [5] ChoCH検出: BOS継続 vs ChoCH転換を独立実装、スコアに加算（最大5点）
 //   [6] f_build_json() 関数化: JSON重複コードを排除・保守性向上
+//   [7] sweep_depth_atr_ratio を符号付き化（Bull:+ / Bear:-）
+//   [8] momentum_long/short を二値→方向スコア化（0〜6）
 //
 // ■ 使い方
 //   1. TradingView で 15分足チャートに適用
@@ -216,7 +218,8 @@ else
 liq_sweep_1h       = liq_sweep_bull_1h or liq_sweep_bear_1h
 // [UPDATE] 強度フィルター適用済みSweep（mtf_confluence に使用）
 liq_sweep_qualified = liq_sweep_1h and sweep_strength >= i_sweep_min_str
-sweep_depth_atr_ratio = sweep_strength
+// [NEW] sweep_depth_atr_ratio は方向付きで符号化（重複低減）
+sweep_depth_atr_ratio = liq_sweep_bull_1h ? sweep_strength : liq_sweep_bear_1h ? -sweep_strength : 0.0
 
 // ── 1H BOS (Break of Structure) ──────────────────────────────────
 var bool bos_1h_bull = false
@@ -457,8 +460,10 @@ if sweep_bear_15m
 ob_touch = ob_4h_zone_active and not ob_4h_zone_active[1]
 fvg_touch = fvg_4h_zone_active and not fvg_4h_zone_active[1]
 
-momentum_long  = macd_cross_up   or rsi_oversold
-momentum_short = macd_cross_down or rsi_overbought
+// [NEW] 二値ではなく方向スコア化（情報量を増やす）
+// 0〜6: MACD/RSI(各1) + BOS(1) + ChoCH(2) + 15M MSB(2)
+momentum_long  = (macd_cross_up ? 1 : 0) + (rsi_oversold ? 1 : 0) + (bos_1h_bull ? 1 : 0) + (choch_1h_bull ? 2 : 0) + (msb_15m_bull ? 2 : 0)
+momentum_short = (macd_cross_down ? 1 : 0) + (rsi_overbought ? 1 : 0) + (bos_1h_bear ? 1 : 0) + (choch_1h_bear ? 2 : 0) + (msb_15m_bear ? 2 : 0)
 
 // トリガー条件: SMC的に意味のあるイベント（POI）が起きたか？
 smc_bull_trigger = msb_15m_bull or choch_1h_bull or bos_1h_bull or sweep_bull_15m or ob_touch or fvg_touch
@@ -486,8 +491,8 @@ quality_gate_pass = true
 f_build_json(dir, msb_conf, choch_flag) =>
     _mc = macd_cross_up ? 1 : (macd_cross_down ? -1 : 0)
     _trend_str = trend_bullish ? 1 : (trend_bearish ? -1 : 0)
-    _mom_l = momentum_long ? 1 : 0
-    _mom_s = momentum_short ? 1 : 0
+    _mom_l = momentum_long
+    _mom_s = momentum_short
     _p1 = '{"pair":"' + i_pair + '","direction":"' + dir + '","webhook_token":"' + i_webhook_token + '","msb_15m_confirmed":' + str.tostring(msb_conf) + ',"choch_1h":' + str.tostring(choch_flag)
     _p2 = ',"fvg_4h_zone_active":' + str.tostring(fvg_4h_zone_active) + ',"ob_4h_zone_active":' + str.tostring(ob_4h_zone_active) + ',"liq_sweep_1h":' + str.tostring(liq_sweep_1h) + ',"liq_sweep_qualified":' + str.tostring(liq_sweep_qualified) + ',"bos_1h":' + str.tostring(bos_1h)
     _p3 = ',"mtf_confluence":' + str.tostring(mtf_confluence) + ',"trend_direction":' + str.tostring(_trend_str) + ',"momentum_long":' + str.tostring(_mom_l) + ',"momentum_short":' + str.tostring(_mom_s) + ',"atr":' + str.tostring(math.round(atr_14, 5)) + ',"atr_20d_avg":' + str.tostring(math.round(atr_avg_20, 5)) + ',"close":' + str.tostring(math.round(close, 5)) + ',"atr_ratio":' + str.tostring(math.round(atr_ratio, 4)) + ',"bb_width":' + str.tostring(math.round(bb_width, 4))
@@ -689,8 +694,8 @@ plot(csv_is_signal ? close_vs_ema50_4h : na, title="CSV_close_vs_ema50_4h", disp
 plot(csv_is_signal ? high_low_range_15m : na, title="CSV_high_low_range_15m", display=display.data_window)
 
 plot(csv_is_signal ? (trend_bullish ? 1 : trend_bearish ? -1 : 0) : na, title="CSV_trend_direction", display=display.data_window)
-plot(csv_is_signal ? (momentum_long ? 1 : 0) : na, title="CSV_momentum_long", display=display.data_window)
-plot(csv_is_signal ? (momentum_short ? 1 : 0) : na, title="CSV_momentum_short", display=display.data_window)
+plot(csv_is_signal ? momentum_long : na, title="CSV_momentum_long", display=display.data_window)
+plot(csv_is_signal ? momentum_short : na, title="CSV_momentum_short", display=display.data_window)
 
 plot(csv_is_signal ? macd_hist : na, title="CSV_macd_histogram", display=display.data_window)
 plot(csv_is_signal ? (macd_cross_up ? 1 : macd_cross_down ? -1 : 0) : na, title="CSV_macd_signal_cross", display=display.data_window)

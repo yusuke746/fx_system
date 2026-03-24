@@ -1,0 +1,137 @@
+{
+  "generated_at_utc": "2026-03-24T12:29:37.946541+00:00",
+  "window_days": 30,
+  "closed_total": 49,
+  "by_exit_reason": [
+    {
+      "exit_reason": "prob_decay",
+      "n": 34,
+      "avg_pnl_jpy": -667.21,
+      "sum_pnl_jpy": -22685.0,
+      "avg_hold_min": 4.05
+    },
+    {
+      "exit_reason": "calendar_veto",
+      "n": 8,
+      "avg_pnl_jpy": -1224.88,
+      "sum_pnl_jpy": -9799.0,
+      "avg_hold_min": 20.64
+    },
+    {
+      "exit_reason": "time_decay",
+      "n": 4,
+      "avg_pnl_jpy": -1076.75,
+      "sum_pnl_jpy": -4307.0,
+      "avg_hold_min": 60.95
+    },
+    {
+      "exit_reason": "doten",
+      "n": 3,
+      "avg_pnl_jpy": 484.0,
+      "sum_pnl_jpy": 1452.0,
+      "avg_hold_min": 20.03
+    }
+  ],
+  "by_pair_exit_reason": [
+    {
+      "pair": "EURUSD",
+      "exit_reason": "prob_decay",
+      "n": 19,
+      "avg_pnl_jpy": -547.11,
+      "sum_pnl_jpy": -10395.0
+    },
+    {
+      "pair": "EURUSD",
+      "exit_reason": "time_decay",
+      "n": 2,
+      "avg_pnl_jpy": -1578.5,
+      "sum_pnl_jpy": -3157.0
+    },
+    {
+      "pair": "EURUSD",
+      "exit_reason": "doten",
+      "n": 2,
+      "avg_pnl_jpy": 561.0,
+      "sum_pnl_jpy": 1122.0
+    },
+    {
+      "pair": "EURUSD",
+      "exit_reason": "calendar_veto",
+      "n": 2,
+      "avg_pnl_jpy": -4614.5,
+      "sum_pnl_jpy": -9229.0
+    },
+    {
+      "pair": "GBPJPY",
+      "exit_reason": "prob_decay",
+      "n": 4,
+      "avg_pnl_jpy": -387.5,
+      "sum_pnl_jpy": -1550.0
+    },
+    {
+      "pair": "GBPJPY",
+      "exit_reason": "time_decay",
+      "n": 1,
+      "avg_pnl_jpy": -1100.0,
+      "sum_pnl_jpy": -1100.0
+    },
+    {
+      "pair": "GBPJPY",
+      "exit_reason": "doten",
+      "n": 1,
+      "avg_pnl_jpy": 330.0,
+      "sum_pnl_jpy": 330.0
+    },
+    {
+      "pair": "GBPJPY",
+      "exit_reason": "calendar_veto",
+      "n": 1,
+      "avg_pnl_jpy": -640.0,
+      "sum_pnl_jpy": -640.0
+    },
+    {
+      "pair": "USDJPY",
+      "exit_reason": "prob_decay",
+      "n": 11,
+      "avg_pnl_jpy": -976.36,
+      "sum_pnl_jpy": -10740.0
+    },
+    {
+      "pair": "USDJPY",
+      "exit_reason": "calendar_veto",
+      "n": 5,
+      "avg_pnl_jpy": 14.0,
+      "sum_pnl_jpy": 70.0
+    },
+    {
+      "pair": "USDJPY",
+      "exit_reason": "time_decay",
+      "n": 1,
+      "avg_pnl_jpy": -50.0,
+      "sum_pnl_jpy": -50.0
+    }
+  ],
+  "by_pair": [
+    {
+      "pair": "EURUSD",
+      "n": 25,
+      "avg_hold_min": 10.42,
+      "avg_pnl_jpy": -866.36,
+      "sum_pnl_jpy": -21659.0
+    },
+    {
+      "pair": "GBPJPY",
+      "n": 7,
+      "avg_hold_min": 11.41,
+      "avg_pnl_jpy": -422.86,
+      "sum_pnl_jpy": -2960.0
+    },
+    {
+      "pair": "USDJPY",
+      "n": 17,
+      "avg_hold_min": 15.66,
+      "avg_pnl_jpy": -630.59,
+      "sum_pnl_jpy": -10720.0
+    }
+  ]
+}

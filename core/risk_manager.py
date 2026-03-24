@@ -174,11 +174,17 @@ def calc_sl_tp_pips(
 
     sl_pips = max(sl_min, min(atr_pips * sl_mult, sl_upper_cap))
 
-    tp_min_rr = 1.5  # R:R最低保証（SLの1.5倍）
+    tp_min_rr = float(risk.get("tp_min_rr", 1.5))
     tp_rr_floor = sl_pips * tp_min_rr
 
+    include_ob_4h_candidate = bool(risk.get("tp_include_ob_4h_candidate", True))
+
+    tp_raw_candidates = [tp_swing_pips, tp_fvg_pips]
+    if include_ob_4h_candidate:
+        tp_raw_candidates.append(ob_4h_distance_pips)
+
     candidates = []
-    for val in [tp_swing_pips, tp_fvg_pips, ob_4h_distance_pips]:
+    for val in tp_raw_candidates:
         v = abs(float(val or 0.0))
         if v >= tp_rr_floor:
             candidates.append(v)

@@ -4,6 +4,7 @@
 ■ スケジュール
   毎日 01:00 JST:
     - ログローテーション（30日以前を圧縮）
+        - 学習/最適化アーティファクトのストレージ掃除（古いCSV/JSON/MD削除）
     - sentiment キャッシュ切り詰め
     - DB バックアップ（直近7日保持）
     - 翌日カレンダーキャッシュ更新
@@ -39,6 +40,7 @@ from loguru import logger
 from core.database import check_integrity
 from core.notifier import DiscordNotifier
 from core.time_manager import now_utc, format_jst, is_broker_market_closed, broker_day_start_utc
+from config.settings import get_trading_config
 from ml.retraining import run_weekly_retraining
 
 
@@ -55,6 +57,9 @@ async def daily_maintenance(
 
     # 1. ログローテーション（30日以前を圧縮）
     _compress_old_logs(log_dir, days=30)
+
+    # 1.5 学習/最適化アーティファクト掃除
+    cleanup_summary = _cleanup_storage_artifacts()
 
     # 2. DB バックアップ（直近7日保持）
     _backup_db(db_conn, db_backup_path, keep_days=7)
@@ -81,6 +86,7 @@ async def daily_maintenance(
     await notifier.send(
         f"[日次サマリー] {format_jst(now)}\n"
         f"過去24時間: {row['cnt']}トレード / P&L: ¥{row['total']:,.0f}"
+        f"\nstorage cleanup: {cleanup_summary['deleted_files']} files / {cleanup_summary['freed_mb']:.2f} MB"
     )
 
     logger.info("=== Daily maintenance completed ===")
@@ -278,3 +284,65 @@ def _cleanup_models(model_dir: str, keep_per_pair: int = 3) -> None:
             for old in files[:-keep_per_pair]:
                 old.unlink()
                 logger.info(f"Deleted old model: {old}")
+
+
+def _cleanup_storage_artifacts() -> dict:
+    """古いCSV/JSON/MDアーティファクトを削除して容量を確保する。"""
+    cfg = get_trading_config()
+    mc = cfg.get("maintenance", {})
+    enabled = bool(mc.get("artifact_cleanup_enabled", True))
+    if not enabled:
+        return {"deleted_files": 0, "freed_bytes": 0, "freed_mb": 0.0}
+
+    retention_days = int(mc.get("artifact_retention_days", 14))
+    keep_latest = int(mc.get("artifact_keep_latest", 5))
+
+    root = Path(__file__).resolve().parent.parent
+    data_dir = root / "data"
+
+    targets: list[tuple[Path, str]] = [
+        (data_dir, "*_bootstrap_h*.csv"),
+        (data_dir, "threshold_search_results_*.json"),
+        (data_dir, "horizon_search_results_*.json"),
+        (data_dir, "exit_reason_summary_*.json"),
+        (root, "optimization_report_*.md"),
+        (root, "exit_reason_report_*.md"),
+    ]
+
+    cutoff = now_utc() - timedelta(days=retention_days)
+    deleted_files = 0
+    freed_bytes = 0
+
+    for directory, pattern in targets:
+        if not directory.exists():
+            continue
+
+        files = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime)
+        if not files:
+            continue
+
+        protected = set(files[-keep_latest:]) if keep_latest > 0 else set()
+
+        for fp in files:
+            if fp in protected:
+                continue
+            try:
+                from datetime import datetime, timezone
+
+                file_time = datetime.fromtimestamp(fp.stat().st_mtime, tz=timezone.utc)
+                if file_time >= cutoff:
+                    continue
+
+                file_size = fp.stat().st_size
+                fp.unlink()
+                deleted_files += 1
+                freed_bytes += file_size
+                logger.info(f"Deleted old artifact: {fp}")
+            except OSError as e:
+                logger.warning(f"Artifact cleanup failed for {fp}: {e}")
+
+    return {
+        "deleted_files": deleted_files,
+        "freed_bytes": freed_bytes,
+        "freed_mb": freed_bytes / (1024 * 1024),
+    }
