@@ -9,7 +9,8 @@ MetaTrader5==5.0.5640
 
 # Machine Learning
 lightgbm==4.5.0
-scikit-learn==1.6.1
+scikit-learn==1.6.1; python_version < "3.14"
+scikit-learn>=1.7.0,<1.8; python_version >= "3.14"
 joblib==1.4.2
 numpy==2.2.3; python_version < "3.14"
 numpy>=2.3.0,<3; python_version >= "3.14"
