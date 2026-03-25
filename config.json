@@ -23,7 +23,7 @@
     "low_power_consecutive_skips": 3
   },
   "risk": {
-    "max_risk_per_trade_pct": 2.0,
+    "max_risk_per_trade_pct": 3.0,
     "max_daily_drawdown_pct": 10.0,
     "max_total_exposure_pct": 10.0,
     "max_positions": 5,
@@ -107,32 +107,38 @@
     "prediction_thresholds": {
       "USDJPY": {
         "long": {
-          "direction_threshold": 0.35,
-          "block_threshold": 0.5
+          "direction_threshold": 0.45,
+          "block_threshold": 0.45,
+          "min_edge": 0.1
         },
         "short": {
-          "direction_threshold": 0.45,
-          "block_threshold": 0.4
+          "direction_threshold": 0.5,
+          "block_threshold": 0.4,
+          "min_edge": 0.1
         }
       },
       "EURUSD": {
         "long": {
           "direction_threshold": 0.65,
-          "block_threshold": 0.3
+          "block_threshold": 0.3,
+          "min_edge": 0.1
         },
         "short": {
-          "direction_threshold": 0.35,
-          "block_threshold": 0.45
+          "direction_threshold": 0.45,
+          "block_threshold": 0.4,
+          "min_edge": 0.1
         }
       },
       "GBPJPY": {
         "long": {
-          "direction_threshold": 0.4,
-          "block_threshold": 0.5
+          "direction_threshold": 0.45,
+          "block_threshold": 0.5,
+          "min_edge": 0.1
         },
         "short": {
-          "direction_threshold": 0.45,
-          "block_threshold": 0.4
+          "direction_threshold": 0.5,
+          "block_threshold": 0.4,
+          "min_edge": 0.1
         }
       }
     }

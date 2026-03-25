@@ -158,14 +158,17 @@ class PredictionResult:
             # 精度高: 両方の条件を厳しく
             direction_threshold = 0.45
             block_threshold = 0.35
+            min_edge = 0.08
         elif model_accuracy >= 0.40:
             # 精度中: 中程度の厳しさ
             direction_threshold = 0.40
             block_threshold = 0.45
+            min_edge = 0.06
         else:
             # 精度低: フィルターを強化してノイズ通過を抑制
             direction_threshold = 0.45
             block_threshold = 0.40
+            min_edge = 0.08
 
         if threshold_overrides:
             direction_threshold = float(
@@ -174,12 +177,26 @@ class PredictionResult:
             block_threshold = float(
                 threshold_overrides.get("block_threshold", block_threshold)
             )
+            min_edge = float(
+                threshold_overrides.get("min_edge", min_edge)
+            )
 
-        # AND 条件: direction確率が高い かつ 逆方向確率が低い
+        # AND 条件:
+        #  1) direction確率が高い
+        #  2) 逆方向確率が低い
+        #  3) direction-逆方向のエッジが最小値以上
         if signal_direction == "long":
-            return self.prob_up >= direction_threshold and self.prob_down < block_threshold
+            return (
+                self.prob_up >= direction_threshold
+                and self.prob_down < block_threshold
+                and (self.prob_up - self.prob_down) >= min_edge
+            )
         else:
-            return self.prob_down >= direction_threshold and self.prob_up < block_threshold
+            return (
+                self.prob_down >= direction_threshold
+                and self.prob_up < block_threshold
+                and (self.prob_down - self.prob_up) >= min_edge
+            )
 
     @property
     def is_reverse_signal(self) -> bool:
