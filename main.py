@@ -363,10 +363,14 @@ class Orchestrator:
             reconciled += 1
 
         if reconciled > 0 or unresolved > 0:
-            logger.warning(
+            msg = (
                 "Startup DB reconciliation: "
                 f"reconciled={reconciled}, unresolved={unresolved}, broker_open={len(broker_open_tickets)}"
             )
+            if unresolved > 0:
+                logger.warning(msg)
+            else:
+                logger.info(msg)
 
     def _infer_exit_reason_from_trade_row(self, trade_row: dict, close_price: float) -> str:
         """DB行だけから外部決済の exit_reason を近似推定する。"""
