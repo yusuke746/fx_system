@@ -194,7 +194,7 @@ def calc_sl_tp_pips(
     else:
         logger.warning(
             f"No valid TP candidate for {pair} (all < R:R {tp_min_rr}). "
-            f"Using SL×1.5 fallback ({sl_pips:.1f} pips base)"
+            f"Using SL×{tp_min_rr:g} fallback ({sl_pips:.1f} pips base)"
         )
         tp_candidate = tp_rr_floor
 

@@ -5,7 +5,7 @@
   },
   "llm": {
     "model_instant": "gpt-5.2",
-    "model_diff": "gpt-5.2-nano",
+    "model_diff": "gpt-5-nano",
     "model_thinking": "gpt-5.2",
     "reasoning_effort_instant": "low",
     "reasoning_effort_diff": "low",

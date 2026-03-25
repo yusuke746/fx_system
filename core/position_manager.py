@@ -365,8 +365,8 @@ class PositionManager:
                 # 5分以上経過しても取得できない: 諦めてunregister
                 logger.warning(
                     f"Closed position history not found for ticket={ticket} "
-                    f"after {elapsed:.1f}min; unregister only. "
-                    f"P&L will not be recorded."
+                    f"after {elapsed:.1f}min; unregister now and retry "
+                    f"history backfill in background."
                 )
                 self.unregister_position(ticket)
                 continue
@@ -378,6 +378,97 @@ class PositionManager:
                 closed_info.get("close_price"),
                 reason,
                 pnl_jpy_override=closed_info.get("profit"),
+            )
+
+        self._retry_unrecorded_closed_trades(open_tickets)
+
+    def _retry_unrecorded_closed_trades(self, open_tickets: set[int]) -> None:
+        """
+        DB上で未決済のまま残ったトレードを再照合し、
+        ブローカー履歴が取得できたものからP&Lをバックフィルする。
+        """
+        if self._db_conn is None:
+            return
+
+        config = get_trading_config()
+        risk = config.get("risk", {})
+        lookback_hours = int(risk.get("close_history_retry_lookback_hours", 168))
+        scan_limit = int(risk.get("close_history_retry_scan_limit", 100))
+
+        try:
+            rows = self._db_conn.execute(
+                """SELECT
+                       id,
+                       pair,
+                       direction,
+                       open_time,
+                       open_price,
+                       volume,
+                       sl_price,
+                       tp_price,
+                       mt5_ticket
+                   FROM trades
+                   WHERE close_time IS NULL
+                     AND mt5_ticket IS NOT NULL
+                   ORDER BY open_time DESC
+                   LIMIT ?""",
+                (scan_limit,),
+            ).fetchall()
+        except Exception as e:
+            logger.error(f"Failed to scan unrecorded closed trades: {e}")
+            return
+
+        recovered = 0
+        for row in rows:
+            ticket = int(row["mt5_ticket"])
+            if ticket in open_tickets:
+                continue
+
+            closed_info = self._broker.get_recent_closed_position_info(
+                ticket, lookback_hours=lookback_hours
+            )
+            if closed_info is None:
+                continue
+
+            close_price = closed_info.get("close_price")
+            if close_price is None:
+                logger.warning(
+                    f"Close history found but close_price is missing: ticket={ticket}"
+                )
+                continue
+
+            try:
+                open_time_utc = datetime.fromisoformat(row["open_time"])
+            except Exception:
+                open_time_utc = now_utc()
+
+            pos = ManagedPosition(
+                trade_id=int(row["id"]),
+                ticket=ticket,
+                pair=row["pair"],
+                direction=row["direction"],
+                volume=float(row["volume"]),
+                open_price=float(row["open_price"]),
+                sl_price=float(row["sl_price"] or 0.0),
+                tp_price=float(row["tp_price"] or 0.0),
+                target_tp_price=float(row["tp_price"] or 0.0),
+                target_tp_pips=0.0,
+                open_time_utc=open_time_utc,
+                atr_at_entry=0.0,
+            )
+
+            reason = self._infer_external_exit_reason(pos, float(close_price))
+            self._finalize_closed_position(
+                pos,
+                float(close_price),
+                reason,
+                pnl_jpy_override=closed_info.get("profit"),
+            )
+            recovered += 1
+
+        if recovered > 0:
+            logger.info(
+                f"Recovered {recovered} unrecorded closed trade(s) from broker history."
             )
 
     def _infer_external_exit_reason(self, pos: ManagedPosition, close_price: float) -> str:
