@@ -417,5 +417,9 @@ class MT5Broker:
             logger.debug(f"SL/TP modified: ticket={ticket} SL={sl} TP={tp}")
             return True
 
-        logger.error(f"SL/TP modify failed: ticket={ticket}")
+        logger.error(
+            f"SL/TP modify failed: ticket={ticket} "
+            f"retcode={result.retcode if result else 'None'} "
+            f"sl={sl} tp={tp}"
+        )
         return False

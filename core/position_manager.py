@@ -193,6 +193,11 @@ class PositionManager:
         await self._sync_closed_positions_with_broker()
 
         for ticket, pos in list(self._positions.items()):
+            # MT5側でクローズ検知済み（履歴反映待ち）の間は、
+            # 追加のSL更新や強制クローズを行わない。
+            if pos.close_pending_since is not None:
+                continue
+
             current_price = self._get_current_price(pos.pair, pos.direction)
             if current_price is None:
                 continue
