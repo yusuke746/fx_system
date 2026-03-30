@@ -98,31 +98,85 @@ class MT5Broker:
         logger.critical(f"MT5 reconnect failed after {max_retries} attempts")
         return False
 
+    def _is_ipc_disconnected(self, err: tuple | None) -> bool:
+        """MT5 IPC 切断エラーかどうかを判定する。"""
+        if not err:
+            return False
+        try:
+            return int(err[0]) == -10004
+        except Exception:
+            return False
+
+    def _recover_connection_if_needed(self, reason: str) -> bool:
+        """接続切断時に短時間の再接続を試みる。"""
+        if not MT5_AVAILABLE:
+            return False
+
+        if self.is_connected:
+            return True
+
+        logger.warning(
+            f"MT5 connection lost during {reason}. Attempting quick reconnect..."
+        )
+
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+
+        if not self.connect():
+            logger.error(
+                f"MT5 quick reconnect failed during {reason}: last_error={mt5.last_error()}"
+            )
+            return False
+        return True
+
     # ── 口座情報 ─────────────────────────────────
     def get_account_balance(self) -> float:
         """口座残高（円）を返す。"""
         if not MT5_AVAILABLE:
             return 0.0
+
+        if not self._recover_connection_if_needed("get_account_balance"):
+            return 0.0
+
         info = mt5.account_info()
         if info is None:
-            logger.warning(f"MT5 account_info() returned None while reading balance: last_error={mt5.last_error()}")
+            err = mt5.last_error()
+            logger.warning(f"MT5 account_info() returned None while reading balance: last_error={err}")
+            if self._is_ipc_disconnected(err) and self._recover_connection_if_needed("get_account_balance(retry)"):
+                info = mt5.account_info()
         return info.balance if info else 0.0
 
     def get_account_equity(self) -> float:
         """口座有効証拠金（円）を返す。"""
         if not MT5_AVAILABLE:
             return 0.0
+
+        if not self._recover_connection_if_needed("get_account_equity"):
+            return 0.0
+
         info = mt5.account_info()
         if info is None:
-            logger.warning(f"MT5 account_info() returned None while reading equity: last_error={mt5.last_error()}")
+            err = mt5.last_error()
+            logger.warning(f"MT5 account_info() returned None while reading equity: last_error={err}")
+            if self._is_ipc_disconnected(err) and self._recover_connection_if_needed("get_account_equity(retry)"):
+                info = mt5.account_info()
         return info.equity if info else 0.0
 
     def _ensure_symbol_ready(self, pair: str):
         """発注前に銘柄情報を取得し、必要ならMarket Watchへ追加する。"""
+        if not self._recover_connection_if_needed(f"_ensure_symbol_ready({pair})"):
+            return None
+
         info = mt5.symbol_info(pair)
         if info is None:
-            logger.error(f"MT5 symbol_info() returned None for {pair}: last_error={mt5.last_error()}")
-            return None
+            err = mt5.last_error()
+            if self._is_ipc_disconnected(err) and self._recover_connection_if_needed(f"_ensure_symbol_ready({pair}) retry"):
+                info = mt5.symbol_info(pair)
+            if info is None:
+                logger.error(f"MT5 symbol_info() returned None for {pair}: last_error={err}")
+                return None
 
         if not getattr(info, "visible", True):
             selected = mt5.symbol_select(pair, True)
@@ -142,10 +196,21 @@ class MT5Broker:
         if not MT5_AVAILABLE:
             return []
 
+        if not self._recover_connection_if_needed("get_positions"):
+            return []
+
         if pair:
             positions = mt5.positions_get(symbol=pair)
         else:
             positions = mt5.positions_get()
+
+        if positions is None:
+            err = mt5.last_error()
+            if self._is_ipc_disconnected(err) and self._recover_connection_if_needed("get_positions(retry)"):
+                if pair:
+                    positions = mt5.positions_get(symbol=pair)
+                else:
+                    positions = mt5.positions_get()
 
         if positions is None:
             return []
