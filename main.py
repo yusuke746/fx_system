@@ -1023,8 +1023,8 @@ class Orchestrator:
         from optimizer.weekend_optimizer import auto_tune_execution_noise
         tune_result = auto_tune_execution_noise(self._db_conn)
         if tune_result.get("applied"):
-            reload_trading_config()
-            self._risk_config = load_risk_config(get_trading_config())
+            self._config = reload_trading_config()
+            self._risk_config = load_risk_config(self._config)
             await self._notifier.send(
                 "執行ノイズ最適化を適用しました\n"
                 f"new: {tune_result.get('new')}\n"
@@ -1032,6 +1032,34 @@ class Orchestrator:
             )
         else:
             logger.info(f"Execution noise tuning skipped: {tune_result.get('reason', 'N/A')}")
+
+        # Exit比率ベース最適化（time_exit/atr_sl 構成を週次で補正）
+        from optimizer.weekend_optimizer import auto_tune_exit_mix
+        exit_mix_result = auto_tune_exit_mix(self._db_conn)
+        if exit_mix_result.get("applied"):
+            self._config = reload_trading_config()
+            self._risk_config = load_risk_config(self._config)
+            await self._notifier.send(
+                "Exit比率最適化を適用しました\n"
+                f"new: {exit_mix_result.get('new')}\n"
+                f"metrics: {exit_mix_result.get('metrics')}"
+            )
+        else:
+            logger.info(f"Exit mix tuning skipped: {exit_mix_result.get('reason', 'N/A')}")
+
+        # 方向別配分最適化（pair x direction の prediction_thresholds を週次で補正）
+        from optimizer.weekend_optimizer import auto_tune_directional_allocation
+        directional_result = auto_tune_directional_allocation(self._db_conn)
+        if directional_result.get("applied"):
+            changes = directional_result.get("changed", [])
+            self._config = reload_trading_config()
+            await self._notifier.send(
+                "方向別配分最適化を適用しました\n"
+                f"updated_buckets: {len(changes)}\n"
+                f"sample: {changes[:3]}"
+            )
+        else:
+            logger.info(f"Directional allocation tuning skipped: {directional_result.get('reason', 'N/A')}")
 
         # 週次メンテ後に最新モデルを再読み込み
         reload_result = self._predictor.load_all_models()
