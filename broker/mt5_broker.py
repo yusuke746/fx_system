@@ -338,8 +338,8 @@ class MT5Broker:
 
         price = tick.ask if direction == "long" else tick.bid
 
-        # JPY建てペアは 0.01=1pip、その他は 0.0001=1pip
-        pip_unit = 0.01 if pair in ("USDJPY", "GBPJPY") else 0.0001
+        # JPY建てペアは 0.01=1pip、GOLD系は 0.10=1pip、その他は 0.0001=1pip
+        pip_unit = 0.01 if pair in ("USDJPY", "GBPJPY") else (0.10 if "XAU" in pair or "XAG" in pair else 0.0001)
 
         # ブローカーの最小ストップ距離（ポイント単位）を強制する
         # 環境によって stops_level / trade_stops_level のどちらかになるため両対応する。

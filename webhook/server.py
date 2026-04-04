@@ -98,6 +98,56 @@ async def receive_webhook(request: Request):
     return {"status": "ok", "received_at": payload["received_at_utc"]}
 
 
+@app.post("/webhook/mcp")
+async def receive_mcp_webhook(request: Request):
+    """
+    TV MCP EA からのブレイクアウトシグナルを受信する。
+
+    通常の /webhook と異なり、XAUUSD も受け付ける。
+    必須フィールド: pair, direction, atr, close, breakout_score, pattern, signal_source
+    """
+    client_ip = _get_client_ip(request)
+    if _blocked_ip_cache.get(client_ip):
+        raise HTTPException(status_code=429, detail="Too many invalid auth attempts")
+
+    settings = get_settings()
+    if not _is_ip_allowed(client_ip, settings):
+        raise HTTPException(status_code=403, detail="IP not allowed")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    secret = settings.webhook_secret.get_secret_value()
+    provided_token = str(payload.get("webhook_token", ""))
+    if secret and not hmac.compare_digest(provided_token, secret):
+        _record_auth_failure(client_ip)
+        raise HTTPException(status_code=429, detail="Webhook token verification failed")
+
+    required = ["pair", "direction", "atr", "close", "breakout_score", "signal_source"]
+    missing = [f for f in required if f not in payload]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing fields: {missing}")
+
+    pair = payload["pair"]
+    if pair not in ("USDJPY", "EURUSD", "GBPJPY", "XAUUSD"):
+        raise HTTPException(status_code=400, detail=f"Unsupported pair: {pair}")
+
+    payload["received_at_utc"] = now_utc().isoformat()
+
+    logger.info(
+        f"MCP Webhook received: {pair} {payload['direction']} "
+        f"score={payload.get('breakout_score')} pattern={payload.get('pattern')} "
+        f"at {format_jst(now_utc())}"
+    )
+
+    signal_queue = get_queue()
+    await signal_queue.put(payload)
+
+    return {"status": "ok", "received_at": payload["received_at_utc"]}
+
+
 @app.get("/health")
 async def health():
     """ヘルスチェック用エンドポイント。"""

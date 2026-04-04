@@ -159,5 +159,18 @@
   "broker": {
     "spread_assumption_pips": 1.5,
     "commission_per_lot": 0
+  },
+  "mcp_ea": {
+    "enabled": true,
+    "max_positions": 2,
+    "max_fx_positions": 1,
+    "max_gold_positions": 1,
+    "fx_tp_atr_mult": 2.0,
+    "fx_sl_atr_mult": 1.5,
+    "gold_tp_atr_mult": 2.5,
+    "gold_sl_atr_mult": 2.5,
+    "gold_lot_scale": 0.5,
+    "magic_number": 20250001,
+    "comment_tag": "mcp_ea"
   }
 }

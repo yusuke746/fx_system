@@ -122,6 +122,9 @@ class Orchestrator:
         # ← [NEW] LLMで使用するATR情報キャッシュ（webhook → diff_detection_task）
         self._last_webhook_atrs: dict[str, tuple[float, float]] = {}  # pair -> (atr_14, atr_20d_avg)
 
+        # MCP EA ポジション管理（起動中のチケットセット）
+        self._mcp_position_tickets: set[int] = set()
+
         # スケジューラ
         self._scheduler = AsyncIOScheduler(timezone=UTC)
 
@@ -423,10 +426,200 @@ class Orchestrator:
                 continue
 
             try:
-                await self._process_signal(payload)
+                source = payload.get("signal_source")
+                if source == "mcp":
+                    await self._process_mcp_signal(payload)
+                else:
+                    await self._process_signal(payload)
             except Exception as e:
                 logger.error(f"Signal processing error: {e}")
                 await self._notifier.send_alert(f"シグナル処理エラー: {e}")
+
+    # ── MCP EA シグナル処理 ─────────────────────────────────────────────────────
+
+    def _count_mcp_positions(self, category: str | None = None) -> int:
+        """現在アクティブな MCP ポジション数を返す。"""
+        active_tickets = set(self._position_manager.positions.keys())
+        mcp_active = self._mcp_position_tickets & active_tickets
+        if category is None:
+            return len(mcp_active)
+        gold_pairs = {"XAUUSD", "XAUEUR", "XAGUSDUSD"}
+        count = 0
+        for t in mcp_active:
+            pos = self._position_manager.positions[t]
+            is_gold = pos.pair in gold_pairs
+            if category == "gold" and is_gold:
+                count += 1
+            elif category == "fx" and not is_gold:
+                count += 1
+        return count
+
+    def _calc_mcp_sl_tp_pips(self, pair: str, atr: float) -> tuple[float, float]:
+        """MCP 設定の ATR 倍率から SL/TP を pips で返す。"""
+        mcp_cfg = self._config.get("mcp_ea", {})
+        is_gold = "XAU" in pair or "XAG" in pair
+        if is_gold:
+            sl_mult = float(mcp_cfg.get("gold_sl_atr_mult", 2.5))
+            tp_mult = float(mcp_cfg.get("gold_tp_atr_mult", 2.5))
+            gold_pip_unit = 0.10  # GOLD: 1pip = $0.10
+            sl_pips = (atr * sl_mult) / gold_pip_unit
+            tp_pips = (atr * tp_mult) / gold_pip_unit
+        else:
+            sl_mult = float(mcp_cfg.get("fx_sl_atr_mult", 1.5))
+            tp_mult = float(mcp_cfg.get("fx_tp_atr_mult", 2.0))
+            fx_pip_unit = 0.01 if pair in ("USDJPY", "GBPJPY") else 0.0001
+            atr_pips = atr / fx_pip_unit
+            sl_pips = atr_pips * sl_mult
+            tp_pips = atr_pips * tp_mult
+        return sl_pips, tp_pips
+
+    async def _process_mcp_signal(self, payload: dict) -> None:
+        """
+        TV MCP EA からのブレイクアウトシグナルを処理する。
+
+        ① Calendar Veto 確認
+        ② 時間フィルター
+        ③ MCP ポジション上限確認（FX max 1 / GOLD max 1）
+        ④ FX ペアのみ: LightGBM 方向確認（モデル不在時はスキップ）
+        ⑤ ATR ベース SL/TP 計算
+        ⑥ ロット計算 → MT5 発注
+        """
+        pair = payload["pair"]
+        direction = payload["direction"]
+        atr = float(payload["atr"])
+        close_price = float(payload["close"])
+        breakout_score = int(payload.get("breakout_score", 0))
+        pattern = str(payload.get("pattern", "unknown"))
+
+        mcp_cfg = self._config.get("mcp_ea", {})
+        if not bool(mcp_cfg.get("enabled", True)):
+            logger.info("MCP EA disabled in config")
+            return
+
+        logger.info(
+            f"[MCP] Processing signal: {pair} {direction} "
+            f"score={breakout_score} pattern={pattern}"
+        )
+
+        # ① Calendar Veto
+        veto_active, veto_reason = self._calendar_veto.is_veto_active(pair)
+        if veto_active:
+            logger.info(f"[MCP] Signal vetoed by calendar: {veto_reason}")
+            return
+
+        # ② 時間フィルター
+        if is_excluded_hours():
+            logger.info("[MCP] Signal rejected: excluded broker hours")
+            return
+
+        # ③ MCP ポジション上限確認
+        is_gold = "XAU" in pair or "XAG" in pair
+        category = "gold" if is_gold else "fx"
+        max_cat = int(mcp_cfg.get(f"max_{category}_positions", 1))
+        if self._count_mcp_positions(category) >= max_cat:
+            logger.info(f"[MCP] Position limit reached for {category}")
+            return
+
+        # ④ FX ペアのみ LightGBM 確認（モデル不在時はスキップ）
+        if not is_gold:
+            try:
+                from ml.lgbm_model import build_features
+                now = now_utc()
+                jst_now = to_jst(now)
+                market_data = {**payload, "atr_14": atr, "spread_pips": 1.5}
+                position_data = {
+                    "open_positions_count": len(self._position_manager.positions),
+                }
+                detector = self._diff_detectors.setdefault(pair, DiffDetector())
+                cached = detector.cached_result
+                sentiment_score = float(cached.sentiment_score if cached else 0.0)
+                calendar_risk_score = 0
+
+                features = build_features(
+                    smc_data=payload,
+                    market_data=market_data,
+                    position_data=position_data,
+                    sentiment_score=sentiment_score,
+                    calendar_risk_score=calendar_risk_score,
+                    session_type=get_session_flag(now),
+                    day_of_week=now.weekday(),
+                )
+                prediction = self._predictor.predict(pair, features)
+                if prediction is not None:
+                    # LightGBM が逆方向に強い場合のみブロック
+                    if direction == "long" and prediction.prob_down > 0.55:
+                        logger.info(
+                            f"[MCP] Blocked by LightGBM: down={prediction.prob_down:.2f}"
+                        )
+                        return
+                    if direction == "short" and prediction.prob_up > 0.55:
+                        logger.info(
+                            f"[MCP] Blocked by LightGBM: up={prediction.prob_up:.2f}"
+                        )
+                        return
+            except Exception as e:
+                logger.warning(f"[MCP] LightGBM check skipped: {e}")
+
+        # ⑤ SL/TP 計算
+        sl_pips, tp_pips = self._calc_mcp_sl_tp_pips(pair, atr)
+
+        # ⑥ ロット計算
+        risk_cfg = self._config.get("risk", {})
+        if bool(risk_cfg.get("demo_fixed_lot_enabled", False)):
+            lot = float(risk_cfg.get("demo_fixed_lot", 0.01))
+        else:
+            lot = calc_lot_size(self._broker.get_account_balance(), sl_pips, pair, self._risk_config)
+
+        if is_gold:
+            gold_scale = float(mcp_cfg.get("gold_lot_scale", 0.5))
+            lot = round(lot * gold_scale, 2)
+            lot = max(lot, 0.01)
+
+        # 発注
+        ok, ticket, sl_price, tp_price = await self._broker.open_position_async(
+            pair, direction, lot, sl_pips, tp_pips,
+        )
+
+        if ok and ticket:
+            # DB 記録
+            trade_id = insert_trade(self._db_conn, {
+                "pair": pair,
+                "direction": direction,
+                "open_time": now_utc(),
+                "open_price": close_price,
+                "volume": lot,
+                "sl_price": sl_price,
+                "tp_price": tp_price,
+                "mt5_ticket": ticket,
+            })
+            # ポジション登録
+            self._position_manager.register_position(ManagedPosition(
+                trade_id=trade_id,
+                ticket=ticket,
+                pair=pair,
+                direction=direction,
+                volume=lot,
+                open_price=close_price,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                target_tp_price=tp_price,
+                target_tp_pips=tp_pips,
+                open_time_utc=now_utc(),
+                atr_at_entry=atr,
+                prob_up=0.0,
+                prob_flat=0.0,
+                prob_down=0.0,
+                last_prediction_at_utc=now_utc(),
+            ))
+            self._mcp_position_tickets.add(ticket)
+
+            await self._notifier.send(
+                f"[MCP EA] 新規エントリー: {pair} {direction}\n"
+                f"Lot: {lot} / SL: {sl_price} / TP: {tp_price}\n"
+                f"Pattern: {pattern} (score {breakout_score}/10)"
+            )
+        elif not ok:
+            logger.error(f"[MCP] Order failed for {pair}")
 
     async def _process_signal(self, payload: dict) -> None:
         """
