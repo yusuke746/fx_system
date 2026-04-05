@@ -308,6 +308,20 @@ async def favicon():
     return Response(status_code=204)
 
 
+@app.get("/apple-touch-icon.png", include_in_schema=False)
+async def apple_touch_icon():
+    """iOS/Safari の自動アイコン探索を 204 で処理して 404 ノイズを抑制。"""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
+@app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+async def apple_touch_icon_precomposed():
+    """iOS の precomposed アイコン探索を 204 で処理してログを静かにする。"""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
 def _get_client_ip(request: Request) -> str:
     """プロキシ環境を考慮してクライアントIPを取得する。"""
     settings = get_settings()
