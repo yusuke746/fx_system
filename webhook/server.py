@@ -259,7 +259,7 @@ async def receive_tv_alert(request: Request):
             _record_auth_failure(client_ip)
             raise HTTPException(status_code=429, detail="Webhook token verification failed")
 
-    if payload.get("signal_source") != "tv_alert":
+    if payload.get("signal_source") not in ("tv_alert", "exit_alert"):
         raise HTTPException(status_code=400, detail="Invalid signal_source for tv_alert endpoint")
 
     required = ["pair", "direction", "pattern_level", "atr"]
@@ -274,11 +274,14 @@ async def receive_tv_alert(request: Request):
     # breakout_score がない場合のデフォルト（TV アラートには score がない）
     payload.setdefault("breakout_score", 7)
     payload.setdefault("close", payload["pattern_level"])
-    payload["signal_source"] = "tv_alert"
+    # exit_alert の場合は signal_source をそのまま維持する
+    if payload.get("signal_source") != "exit_alert":
+        payload["signal_source"] = "tv_alert"
     payload["received_at_utc"] = now_utc().isoformat()
 
+    source_label = payload["signal_source"]
     logger.info(
-        f"TV Alert received: {pair} {payload['direction']} "
+        f"TV Alert received [{source_label}]: {pair} {payload['direction']} "
         f"@ {payload.get('pattern_level')} pattern={payload.get('pattern')}"
     )
 

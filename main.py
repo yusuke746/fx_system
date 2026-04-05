@@ -433,6 +433,8 @@ class Orchestrator:
                 source = payload.get("signal_source")
                 if source == "mcp_context":
                     self._handle_mcp_context(payload)
+                elif source == "exit_alert":
+                    await self._handle_exit_alert(payload)
                 elif source in ("mcp", "tv_alert"):
                     await self._process_mcp_signal(payload)
                 else:
@@ -454,7 +456,78 @@ class Orchestrator:
         # 登録時のペア名と一致させる必要がある
         self._position_manager.update_market_context(pair, payload)
 
-    def _count_mcp_positions(self, category: str | None = None) -> int:
+    async def _handle_exit_alert(self, payload: dict) -> None:
+        """
+        TV 構造レベル到達アラート（exit_alert）を処理する。
+
+        tv_mcp_ea が描画した S/R・トライアングル・チャネル境界に価格が
+        リアルタイムで到達した際に発火する。position_manager の 1 分ポーリングより
+        高速にクローズ判定を実行できる「高速パス」。
+
+        判定ロジック:
+          - exit_type="tp": 構造的 TP レベル到達 → 即クローズ
+          - exit_type="sl": 構造的 SL レベル到達 → 即クローズ
+          - チケット指定あり → そのポジションのみ対象
+          - チケット指定なし → ペアマッチで検索
+        """
+        pair = payload.get("pair", "")
+        exit_type = payload.get("exit_type", "")
+        ticket_hint = int(payload.get("ticket", 0))
+        pattern_level = float(payload.get("pattern_level", 0))
+        pattern = payload.get("pattern", "unknown")
+
+        logger.info(
+            f"[EXIT ALERT] {pair} {exit_type} @ {pattern_level:.5f} "
+            f"pattern={pattern} ticket_hint={ticket_hint}"
+        )
+
+        # 対象ポジションを特定
+        target_pos = None
+        if ticket_hint and ticket_hint in self._position_manager.positions:
+            target_pos = self._position_manager.positions[ticket_hint]
+        else:
+            # ペア名で検索（同一ペア複数ポジション時は先頭）
+            for pos in self._position_manager.positions.values():
+                if pos.pair == pair:
+                    target_pos = pos
+                    break
+
+        if target_pos is None:
+            logger.info(f"[EXIT ALERT] No matching position for {pair} — ignoring")
+            return
+
+        # クローズ判定
+        current_price = self._position_manager._get_current_price(pair, target_pos.direction)
+        if current_price is None:
+            logger.warning(f"[EXIT ALERT] Cannot get current price for {pair}")
+            return
+
+        reason = f"structural_{exit_type}_{pattern}"
+
+        if exit_type == "tp":
+            # 構造的 TP 到達 → 即利確
+            logger.info(
+                f"[EXIT ALERT] Structural TP hit: {pair} ticket={target_pos.ticket} "
+                f"pattern={pattern} level={pattern_level:.5f}"
+            )
+            await self._position_manager._force_close(target_pos, reason, current_price)
+
+        elif exit_type == "sl":
+            # 構造的 SL 到達 → 保護的損切り
+            # ただし MT5 の OCO SL がまだ発動していなければ即クローズ
+            logger.info(
+                f"[EXIT ALERT] Structural SL hit: {pair} ticket={target_pos.ticket} "
+                f"pattern={pattern} level={pattern_level:.5f}"
+            )
+            await self._position_manager._force_close(target_pos, reason, current_price)
+
+        else:
+            # exit_type 不明の場合はログのみ（安全側）
+            logger.warning(
+                f"[EXIT ALERT] Unknown exit_type='{exit_type}' for {pair} — skipping close"
+            )
+
+
         """現在アクティブな MCP ポジション数を返す。"""
         active_tickets = set(self._position_manager.positions.keys())
         mcp_active = self._mcp_position_tickets & active_tickets
