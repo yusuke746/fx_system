@@ -1,11 +1,11 @@
 # FX自動売買システム 詳細設計書 v2.3
 
-> 実装同期メモ: 現行コードは LightGBM 35特徴量、Pine `mtf_smc_v2_3.pine`、動的エグジット（`time_decay` / `structural_tp` / trailing）に移行済みです。本文に旧 v2.2 前提の記述が残る場合は、この注記と実装を優先してください。
+> 実装同期メモ: 現行コードは LightGBM 35特徴量、Pine `mtf_smc_v2_3.pine`、動的エグジット（`time_decay` / `structural_tp` / trailing）に移行済みです。tv_mcp_ea 統合により XAUUSD (GOLD) 対応が追加されました（MCP 専用枠）。本文に旧 v2.2 前提の記述が残る場合は、この注記と実装を優先してください。
 
-**対象通貨:** USD/JPY · EUR/USD · GBP/JPY（GOLD: v3.0以降）
+**対象通貨:** USD/JPY · EUR/USD · GBP/JPY（Pine経由）+ XAU/USD（tv_mcp_ea 経由）
 **実行環境:** Windows レンタルサーバー（常時稼働 / VPS）
 **ブローカー:** XMTrading KIWA極口座
-**ステータス:** 設計凍結 → Phase 1実装へ移行
+**ステータス:** 設計凍結 → Phase 1実装 + tv_mcp_ea 統合完了
 
 ---
 
@@ -18,11 +18,12 @@
 5. [エグジット戦略](#5-エグジット戦略)
 6. [ブローカー設計](#6-ブローカー設計)
 7. [DB・メンテナンス設計](#7-dbメンテナンス設計)
-8. [実装ロードマップ](#8-実装ロードマップ)
-9. [付録](#付録)
-   - [F. カレンダーAPI選定](#f-カレンダーapi選定)
-   - [G. 環境変数管理（.env）](#g-環境変数シークレット管理env)
-   - [H. リスク管理設計](#h-リスク管理設計)
+8. [tv_mcp_ea 統合設計](#8-tv_mcp_ea-統合設計)
+9. [実装ロードマップ](#9-実装ロードマップ)
+10. [付録](#付録)
+    - [F. カレンダーAPI選定](#f-カレンダーapi選定)
+    - [G. 環境変数管理（.env）](#g-環境変数シークレット管理env)
+    - [H. リスク管理設計](#h-リスク管理設計)
 
 ---
 
@@ -38,6 +39,7 @@
 | Python Veto B   | GPT-5.2の突発イベントフラグ（`unexpected_veto: true`）                             | Python         |
 | LightGBM        | 35特徴量（MTF SMC版）→ 上昇/横ばい/下落 確率出力                                    | LightGBM 4.x   |
 | エグジット      | ATR動的SL / time decay / structural TP / trailing / 金曜クローズ | Python         |
+| tv_mcp_ea       | TradingView CDP 経由パターン検出 → GPT-5-mini 採点 → ブレイクアウトスコアリング → fx_system POST | Python + CDP   |
 | ブローカー      | XMTrading KIWA極口座 / MT5 Python / asyncio + ThreadPoolExecutor(max_workers=1)      | MetaTrader5    |
 
 ### 1.2 クリティカルパス（目標500ms以内）
@@ -69,15 +71,19 @@
 毎月月初日曜02:00:  古いモデル削除・月次集計・クラウドバックアップ・APIコストレポート
 ```
 
-### 1.4 対象銘柄の最終決定
+### 1.4 対象銘柄
 
-**確定: USD/JPY・EUR/USD・GBP/JPY の3ペアのみ（GOLD = v3.0以降）**
+**Pine Script 経由（fx_system 単体）:** USD/JPY · EUR/USD · GBP/JPY の3ペア
+**MCP EA 経由（tv_mcp_ea → fx_system）:** USD/JPY · EUR/USD · GBP/JPY · XAU/USD の4ペア
 
-GOLD追加見送り理由:
+GOLDは Pine 経路には追加せず、tv_mcp_ea 専用の MCP 枠（最大1ポジション）で運用する。
 
-1. **Liquidity Sweepの規模が別次元** — XAU/USDのストップ狩りは通貨ペアの2〜3倍の振れ幅。現在のATR×1.5 SL設計では狩られる。
-2. **USD相関による実質的なリスク重複** — USD/JPYとXAU/USDはDXYを通じて逆相関。GOLDを加えるとポジションサイジングが破綻する可能性がある。
-3. **Phase 1で複雑性を増やさない原則** — まず3ペアで安定稼働することが最優先。
+GOLD を MCP 専用枠にした理由:
+
+1. **Liquidity Sweepの規模が別次元** — XAU/USDのストップ狩りは通貨ペアの2〜3倍の振れ幅。Pine の ATR×1.5 SL設計では狩られるため、MCP 側では ATR×2.5 SL を適用。
+2. **USD相関による実質的なリスク重複** — USD/JPYとXAU/USDはDXYを通じて逆相関。枠を分離することでポジションサイジングの破綻を防ぐ。
+3. **LightGBM モデル未整備** — GOLD 用の学習済みモデルがないため、MCP シグナルでは LightGBM のブロック判定をスキップし、パターン品質スコア（GPT-5-mini）で補完する。
+4. **ポジション枠の独立** — Pine 枠（最大5）と MCP 枠（FX最大1 + GOLD最大1 = 合計2）は完全独立管理。
 
 ---
 
@@ -496,7 +502,173 @@ STEP 4: 変更時のみ config.json に反映
 
 ---
 
-## 8. 実装ロードマップ
+## 8. tv_mcp_ea 統合設計
+
+### 8.1 概要
+
+tv_mcp_ea は TradingView Desktop の CDP（Chrome DevTools Protocol）に直接 WebSocket 接続し、チャートパターンのブレイクアウトを自動検出して fx_system の `/webhook/mcp` エンドポイントに POST する自律エージェント。**「プロトレーダーがチャートに線を引いてエントリーポイントを決める」プロセスを自動化する。**
+
+GitHub: https://github.com/yusuke746/tv_mcp_ea
+
+### 8.2 アーキテクチャ
+
+```
+TradingView Desktop (CDP port 9222)
+        │ WebSocket（描画更新）
+        ▼
+   cdp_client.py ──── drawing/chart_manager.py
+                              │ entity_id 保存
+                        state/drawing_state.json
+
+MT5 Terminal
+        │ copy_rates_from_pos (M15/H1)
+        ▼
+   data_feed.py → OHLCV + ATR14
+        │
+        ▼
+   detection/ (scipy)
+   ├── swing.py         スイング高値/安値 (argrelextrema)
+   ├── sr_levels.py     S/R レベル (価格クラスタリング)
+   ├── triangle.py      トライアングル (線形回帰)
+   └── channel.py       平行チャネル (スロープ ±15%)
+        │
+        ▼
+   analysis/ai_scorer.py → GPT-5-mini 品質スコア (0-100)
+        │
+        ▼
+   executor/breakout_detector.py → 10点スコアリング
+        │ score ≥ 7 → HTTP POST
+        ▼
+   fx_system /webhook/mcp (FastAPI port 8000)
+        │ signal_source="mcp" → _process_mcp_signal()
+        ▼
+   MT5 発注
+```
+
+### 8.3 スキャンサイクル（5分毎 / APScheduler）
+
+1. **MT5 から M15・H1 OHLCV を取得** — `data_feed.py` (copy_rates_from_pos + Wilder ATR14)
+2. **パターン検出** — スイング(order=5) → S/R → トライアングル → チャネル
+3. **チャート描画** — TV に表示中のシンボルと一致する場合のみ CDP 経由で水平線/トレンドライン描画
+4. **AI スコアリング** — 検出パターンごとに GPT-5-mini で品質スコア (0-100) を取得
+5. **ブレイクアウト判定** — 直近確定 M15 足でレベルブレイクを10点満点で採点
+6. **Webhook POST** — スコア ≥ 7 で `fx_system /webhook/mcp` へ POST
+
+### 8.4 ブレイクアウト 10点スコアリング
+
+| 項目 | 点数 | 判定条件 |
+|------|-----:|---|
+| クローズ確認 | +2 | 直近確定足終値がレベルを超えている |
+| 出来高急増 | +2 | 直近足 > 20本平均 × 1.5 |
+| ローソク実体比率 | +1 | \|close-open\| / (high-low) > 0.50 |
+| HTF バイアス | +2 | 1H EMA20 > EMA50（ロング）or < EMA50（ショート） |
+| AI 品質スコア | +3 | GPT-5-mini スコア ≥75→+3 / ≥55→+2 / ≥40→+1 |
+| **発注閾値** | **≥7** | `config.yaml` の `score_threshold` で変更可 |
+
+### 8.5 パターン検出モジュール詳細
+
+| モジュール | 入力 | 出力 | アルゴリズム |
+|---|---|---|---|
+| `swing.py` | DataFrame (OHLCV) | `SwingPoint[]` | scipy `argrelextrema` (order=5) |
+| `sr_levels.py` | `SwingPoint[]` | `SRLevel[]` | 価格クラスタリング (cluster_pips=5.0, min_touches=2) |
+| `triangle.py` | `SwingPoint[]` (high/low) | `Triangle[]` | 線形回帰 (R²確認, apex計算, 3種分類) |
+| `channel.py` | `SwingPoint[]` (high/low) | `Channel[]` | 並行スロープ (±15%許容, R²≥0.80) |
+
+### 8.6 fx_system 側の MCP シグナル処理
+
+#### Webhook ペイロード（tv_mcp_ea → fx_system）
+
+```json
+{
+  "pair": "USDJPY",
+  "direction": "long",
+  "atr": 0.385,
+  "close": 149.852,
+  "breakout_score": 8,
+  "pattern": "sr_resistance_149.85000",
+  "pattern_level": 149.85,
+  "ai_quality_score": 78,
+  "ai_reason": "Clean SR with 3 touches and strong rejection candles",
+  "signal_source": "mcp",
+  "webhook_token": "<WEBHOOK_SECRET>"
+}
+```
+
+#### _process_mcp_signal() の処理フロー
+
+```
+① Calendar Veto 確認 → 高インパクト指標前後30分はブロック
+② 時間フィルター → 深夜帯 (00:00-07:00 JST) 除外
+③ MCP ポジション上限確認
+   ├── FX: _count_mcp_positions("fx") < max_fx_positions (1)
+   └── GOLD: _count_mcp_positions("gold") < max_gold_positions (1)
+④ FX ペアのみ: LightGBM 逆方向確率 > 0.55 → ブロック
+   └── GOLD は LightGBM モデル未整備のためスキップ
+⑤ SL/TP 計算 (_calc_mcp_sl_tp_pips)
+   ├── FX:   SL = ATR × 1.5 / pip_unit,  TP = ATR × 2.0 / pip_unit
+   └── GOLD: SL = ATR × 2.5 / 0.10,      TP = ATR × 2.5 / 0.10
+⑥ ロット計算 → GOLD は gold_lot_scale (0.5) 倍
+⑦ MT5 発注 → DB 記録 → Discord 通知
+```
+
+#### ポジション管理の枠分離
+
+| 枠 | 最大数 | 対象 | 管理方法 |
+|---|---|---|---|
+| Pine 枠 | MAX_POSITIONS=5 | USDJPY / EURUSD / GBPJPY | `_position_manager.positions` |
+| MCP FX 枠 | 1 | USDJPY / EURUSD / GBPJPY | `_mcp_position_tickets` (category="fx") |
+| MCP GOLD 枠 | 1 | XAUUSD | `_mcp_position_tickets` (category="gold") |
+
+Pine 枠と MCP 枠は完全に独立。MCP で開いたポジションは `_mcp_position_tickets: set[int]` で MT5 チケット番号を追跡し、FX/GOLD それぞれのカテゴリでカウントする。
+
+### 8.7 config.json `mcp_ea` セクション
+
+```json
+"mcp_ea": {
+  "enabled": true,
+  "max_positions": 2,
+  "max_fx_positions": 1,
+  "max_gold_positions": 1,
+  "fx_tp_atr_mult": 2.0,
+  "fx_sl_atr_mult": 1.5,
+  "gold_tp_atr_mult": 2.5,
+  "gold_sl_atr_mult": 2.5,
+  "gold_lot_scale": 0.5,
+  "magic_number": 20250001,
+  "comment_tag": "mcp_ea"
+}
+```
+
+### 8.8 GOLD (XAU/USD) の特別扱い
+
+| 項目 | FX ペア | GOLD |
+|---|---|---|
+| SL 倍率 | ATR × 1.5 | ATR × 2.5 |
+| TP 倍率 | ATR × 2.0 | ATR × 2.5 |
+| pip_unit | 0.01(JPY) / 0.0001(EUR) | 0.10 |
+| ロットスケール | 1.0 | 0.5（FX の半分） |
+| LightGBM 方向確認 | 逆方向 prob > 0.55 でブロック | スキップ（モデル未整備） |
+| 最大ポジション | MCP FX 枠: 1 | MCP GOLD 枠: 1 |
+| MT5 シンボル名 | USDJPY / EURUSD / GBPJPY | GOLD（XMTrading での登録名） |
+| TV シンボル名 | OANDA:USDJPY 等 | OANDA:XAUUSD |
+
+### 8.9 CDP 接続仕様
+
+- **接続先:** `ws://localhost:9222/devtools/page/{targetId}`
+- **ターゲット検出:** `http://localhost:9222/json/list` → URL に `tradingview.com` を含むページ
+- **TradingView API パス:** `window.TradingViewApi._activeChartWidgetWV.value()`
+- **描画操作:** `createShape()` / `createMultipointShape()` → `getAllShapes()` diff で entity_id 特定
+- **描画管理:** `state/drawing_state.json` にシンボル別 entity_id を保持、スキャンごとにクリア＆再描画
+
+### 8.10 tv_mcp_ea ↔ fx_system 認証
+
+- tv_mcp_ea は `.env` の `WEBHOOK_SECRET`（フォールバック: `WEBHOOK_TOKEN`）を読む
+- fx_system は JSON ボディ内の `webhook_token` フィールドを `settings.webhook_secret` と `hmac.compare_digest` で定数時間比較
+- HMAC ヘッダーではなく共有トークン照合方式
+
+---
+
+## 9. 実装ロードマップ
 
 | Phase             | 期間        | 実装内容                                                                                                                                                        | Go判定基準                                                          |
 | ----------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
@@ -509,7 +681,7 @@ STEP 4: 変更時のみ config.json に反映
 
 ---
 
-## 付録
+## 10. 付録
 
 ### A. 技術スタック
 
@@ -530,6 +702,10 @@ STEP 4: 変更時のみ config.json に反映
 | カレンダーAPI    | Forex Factory XML Feed（無料・登録不要）                      | 付録F参照                           |
 | シークレット管理 | python-dotenv / pydantic-settings (.env)                      | 付録G参照                           |
 | 最適化           | 旧グリッド探索は安全停止 / execution noise のみ週次自動調整   | v2.3実装同期                        |
+| CDP 接続（tv_mcp_ea） | aiohttp + websockets → TradingView Desktop port 9222    | 確定                                |
+| パターン検出（tv_mcp_ea） | scipy (argrelextrema) + 線形回帰                     | 確定                                |
+| AI スコアリング（tv_mcp_ea） | OpenAI GPT-5-mini (json_object format)             | 確定                                |
+| スケジューラ（tv_mcp_ea） | APScheduler (AsyncIOScheduler) 5分インターバル       | 確定                                |
 
 ### B. 設計完成度の推移
 
@@ -539,6 +715,7 @@ STEP 4: 変更時のみ config.json に反映
 | v2.0           | 75点           | 90点               | 非同期キャッシュ・特徴量削減・エグジット4層・DB設計                 |
 | v2.1           | 82点           | 92点（想定）       | 差分検知・ドテン並列・KIWA極・MTF SMC                               |
 | **v2.2** | **86点** | **設計凍結** | ATR×1.5+低消費モード・ドテンインターバル・週末自動最適化・GOLD延期 |
+| **v2.3** | —        | —            | tv_mcp_ea 統合（CDP パターン検出 + GPT-5-mini + ブレイクアウトスコアリング）・MCP 枠ポジション管理・GOLD 対応 |
 
 ### C. config.json スキーマ
 
@@ -602,6 +779,19 @@ STEP 4: 変更時のみ config.json に反映
   "broker": {
     "spread_assumption_pips": 1.5,
     "commission_per_lot": 0
+  },
+  "mcp_ea": {
+    "enabled": true,
+    "max_positions": 2,
+    "max_fx_positions": 1,
+    "max_gold_positions": 1,
+    "fx_tp_atr_mult": 2.0,
+    "fx_sl_atr_mult": 1.5,
+    "gold_tp_atr_mult": 2.5,
+    "gold_sl_atr_mult": 2.5,
+    "gold_lot_scale": 0.5,
+    "magic_number": 20250001,
+    "comment_tag": "mcp_ea"
   }
 }
 ```
@@ -742,6 +932,7 @@ def is_veto_active(events: list[dict], pair: str, now: datetime, buffer_minutes:
         "USDJPY": {"USD", "JPY"},
         "EURUSD": {"EUR", "USD"},
         "GBPJPY": {"GBP", "JPY"},
+        "XAUUSD": {"XAU", "USD"},
     }
     currencies = pair_currencies.get(pair, set())
     buf = timedelta(minutes=buffer_minutes)

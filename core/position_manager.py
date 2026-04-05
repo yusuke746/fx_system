@@ -38,6 +38,22 @@ from core.time_manager import (
 
 
 @dataclass
+class MarketContext:
+    """tv_mcp_ea から5分毎に受信する市場構造データ。"""
+    nearest_resistance: float = 0.0
+    nearest_support: float = 0.0
+    resistance_strength: int = 0
+    support_strength: int = 0
+    swing_high: float = 0.0
+    swing_low: float = 0.0
+    htf_bias: str = "neutral"  # "long" | "short" | "neutral"
+    ema20_1h: float = 0.0
+    ema50_1h: float = 0.0
+    current_atr: float = 0.0
+    updated_at: datetime | None = None
+
+
+@dataclass
 class ManagedPosition:
     """管理中のポジション情報。"""
     trade_id: int | None
@@ -62,7 +78,12 @@ class ManagedPosition:
     trailing_low: float = float("inf")  # short の場合の最安値
     last_trailing_update_utc: datetime | None = None
     close_pending_since: datetime | None = None
-    # MT5側で決済済みだが履歴取得に失敗した場合のタイムスタンプ
+    # tv_mcp_ea からの市場コンテキスト（5分毎更新）
+    market_ctx: MarketContext | None = None
+    # MCP EA 経由のポジションかどうか
+    is_mcp: bool = False
+    # エントリー時の HTF バイアス（トレンド反転検知用）
+    entry_htf_bias: str = ""
 
 
 class PositionManager:
@@ -93,6 +114,83 @@ class PositionManager:
             f"Position registered: {pos.pair} {pos.direction} "
             f"ticket={pos.ticket} vol={pos.volume}"
         )
+
+    def update_market_context(self, pair: str, ctx_data: dict) -> None:
+        """
+        tv_mcp_ea からの Market Context で保有ポジションを更新する。
+
+        対象ペアの全ポジションに最新の S/R・スイング・EMA 情報を反映し、
+        構造的 TP 価格を動的に更新する。
+        """
+        ctx = MarketContext(
+            nearest_resistance=float(ctx_data.get("nearest_resistance", 0)),
+            nearest_support=float(ctx_data.get("nearest_support", 0)),
+            resistance_strength=int(ctx_data.get("resistance_strength", 0)),
+            support_strength=int(ctx_data.get("support_strength", 0)),
+            swing_high=float(ctx_data.get("swing_high", 0)),
+            swing_low=float(ctx_data.get("swing_low", 0)),
+            htf_bias=str(ctx_data.get("htf_bias", "neutral")),
+            ema20_1h=float(ctx_data.get("ema20_1h", 0)),
+            ema50_1h=float(ctx_data.get("ema50_1h", 0)),
+            current_atr=float(ctx_data.get("atr", 0)),
+            updated_at=now_utc(),
+        )
+
+        updated = 0
+        for pos in self._positions.values():
+            if pos.pair != pair:
+                continue
+            pos.market_ctx = ctx
+
+            # 構造的 TP を動的更新: 利益方向の最寄り S/R を目標にする
+            structural_tp = self._calc_structural_tp(pos, ctx)
+            if structural_tp > 0:
+                old_tp = pos.target_tp_price
+                pos.target_tp_price = structural_tp
+                if abs(old_tp - structural_tp) > 1e-6:
+                    logger.info(
+                        f"Structural TP updated: {pos.pair} ticket={pos.ticket} "
+                        f"{old_tp:.5f} → {structural_tp:.5f}"
+                    )
+            updated += 1
+
+        if updated > 0:
+            logger.debug(f"Market context applied to {updated} position(s) for {pair}")
+
+    def _calc_structural_tp(self, pos: ManagedPosition, ctx: MarketContext) -> float:
+        """
+        構造的 TP 候補を選出する。
+
+        候補の優先順位:
+        1. 利益方向の最寄り S/R レベル (タッチ数 ≥ 2 で信頼性が高い)
+        2. 直近スイング高値/安値
+        3. フォールバック: 0 (ATR ベースの TP をそのまま使う)
+
+        S/R レベルに ATR の 20% のバッファを入れて、
+        レベルの手前で確実に利確できるようにする。
+        """
+        atr = ctx.current_atr if ctx.current_atr > 0 else pos.atr_at_entry
+        buffer = atr * 0.2  # レベル手前にバッファ
+
+        if pos.direction == "long":
+            # ロング: 上方向の壁を探す
+            candidates = []
+            if ctx.nearest_resistance > pos.open_price:
+                candidates.append(ctx.nearest_resistance - buffer)
+            if ctx.swing_high > pos.open_price:
+                candidates.append(ctx.swing_high - buffer)
+            # 最も近い (= 届きやすい) 候補を選択
+            valid = [c for c in candidates if c > pos.open_price + atr * 0.5]
+            return min(valid) if valid else 0.0
+        else:
+            # ショート: 下方向の壁を探す
+            candidates = []
+            if ctx.nearest_support > 0 and ctx.nearest_support < pos.open_price:
+                candidates.append(ctx.nearest_support + buffer)
+            if ctx.swing_low > 0 and ctx.swing_low < pos.open_price:
+                candidates.append(ctx.swing_low + buffer)
+            valid = [c for c in candidates if c < pos.open_price - atr * 0.5]
+            return max(valid) if valid else 0.0
 
     def unregister_position(self, ticket: int) -> ManagedPosition | None:
         """ポジションを管理対象から除外する。"""
@@ -186,6 +284,15 @@ class PositionManager:
     async def monitor_positions(self) -> None:
         """
         毎分実行: 全ポジションのダイナミック・エグジットをチェックする。
+
+        エグジット優先順位:
+            1. Calendar Veto 強制クローズ（Orchestrator 側で処理）
+            2. ATR 動的 SL 到達（MT5 OCO 注文）
+            3. HTF バイアス反転（MCP ポジション: EMA クロスが反転した場合）
+            4. time_decay（時間切れ撤退）
+            5. structural TP（S/R・スイング構造目標到達）
+            6. 構造的トレーリング（S/R ベース or ATR トレーリング）
+            7. 金曜クローズ（安全弁）
         """
         config = get_trading_config()
         risk = config["risk"]
@@ -205,24 +312,74 @@ class PositionManager:
             # 優先1: Calendar Veto強制クローズ（Orchestrator側で処理）
             # 優先2: ATR動的SL到達（MT5 OCO注文）
 
-            # 優先3: time_decay（時間切れ撤退）
+            # 優先3: HTFバイアス反転（MCP + market_ctx ありの場合のみ）
+            if self._should_exit_bias_reversal(pos):
+                await self._force_close(pos, "bias_reversal", current_price)
+                continue
+
+            # 優先4: time_decay（時間切れ撤退）
             if self._should_exit_time_decay(pos, current_price, risk):
                 await self._force_close(pos, "time_decay", current_price)
                 continue
 
-            # 優先4: structural TP（構造目標到達）
+            # 優先5: structural TP（構造目標到達）
             if self._has_hit_structural_target(pos, current_price):
                 await self._force_close(pos, "structural_tp", current_price)
                 continue
 
-            # 優先5: trailing stop（利益追従）
+            # 優先6: 構造的トレーリング or ATR トレーリング
             if pos.trailing_active:
-                await self._update_trailing_stop(pos, current_price, risk)
+                await self._update_structural_trailing(pos, current_price, risk)
 
-            # 優先6: 金曜クローズ（安全弁）
+            # 優先7: 金曜クローズ（安全弁）
             if is_friday_close_window(now_utc()):
                 await self._force_close(pos, "time_exit", current_price)
                 continue
+
+    def _should_exit_bias_reversal(self, pos: ManagedPosition) -> bool:
+        """
+        HTF バイアスがエントリー方向と逆転した場合にエグジットする。
+
+        条件:
+        - MCP ポジションかつ market_ctx が5分以内に更新されていること
+        - エントリー時の HTF バイアスが記録されていること
+        - 現在の HTF バイアスがエントリー方向と反対に反転していること
+        - 最低 15 分保持（フラッシュ反転を除外）
+        """
+        if not pos.is_mcp or pos.market_ctx is None:
+            return False
+        if pos.market_ctx.updated_at is None:
+            return False
+        # コンテキストが10分以上古い場合は無効（tv_mcp_ea が停止している可能性）
+        if elapsed_minutes(pos.market_ctx.updated_at) > 10:
+            return False
+        # 最低保持時間
+        if elapsed_minutes(pos.open_time_utc) < 15:
+            return False
+        # エントリー時のバイアスが未記録なら判定不能
+        if not pos.entry_htf_bias or pos.entry_htf_bias == "neutral":
+            return False
+
+        current_bias = pos.market_ctx.htf_bias
+        if current_bias == "neutral":
+            return False
+
+        # ロングエントリー → ショートバイアスに反転 = 撤退
+        if pos.direction == "long" and pos.entry_htf_bias == "long" and current_bias == "short":
+            logger.info(
+                f"Bias reversal detected: {pos.pair} ticket={pos.ticket} "
+                f"entry_bias=long → current_bias=short"
+            )
+            return True
+        # ショートエントリー → ロングバイアスに反転 = 撤退
+        if pos.direction == "short" and pos.entry_htf_bias == "short" and current_bias == "long":
+            logger.info(
+                f"Bias reversal detected: {pos.pair} ticket={pos.ticket} "
+                f"entry_bias=short → current_bias=long"
+            )
+            return True
+
+        return False
 
     def _should_exit_time_decay(
         self,
@@ -256,52 +413,107 @@ class PositionManager:
             return current_price >= pos.target_tp_price
         return current_price <= pos.target_tp_price
 
-    async def _update_trailing_stop(
+    async def _update_structural_trailing(
         self, pos: ManagedPosition, current_price: float, risk: dict
     ) -> None:
-        """トレーリングストップ: 高値/安値更新ごとに ATR倍率で追従する。"""
-        trail_dist = pos.atr_at_entry * risk.get("trailing_atr_multiplier", 0.8)
+        """
+        構造的トレーリング: S/R レベルとスイング高安を使って SL を構造的に引き上げる。
+
+        Market Context がある場合:
+            - ロング: 直近サポート or スイング安値の手前に SL を移動
+            - ショート: 直近レジスタンス or スイング高値の向こう側に SL を移動
+        Market Context がない場合:
+            - フォールバック: 従来の ATR×0.8 固定距離トレーリング
+        """
         cooldown_seconds = float(risk.get("trailing_update_cooldown_seconds", 30))
         min_step_pips = float(risk.get("trailing_min_step_pips", 2.0))
-        pip_unit = 0.01 if pos.pair in ("USDJPY", "GBPJPY") else 0.0001
+        pip_unit = 0.01 if pos.pair in ("USDJPY", "GBPJPY") else (0.10 if pos.pair in ("GOLD", "XAUUSD") else 0.0001)
         min_step_price = max(0.0, min_step_pips * pip_unit)
 
         if pos.last_trailing_update_utc is not None:
             if elapsed_seconds(pos.last_trailing_update_utc) < cooldown_seconds:
                 return
 
+        ctx = pos.market_ctx
+        atr = ctx.current_atr if (ctx and ctx.current_atr > 0) else pos.atr_at_entry
+        buffer = atr * 0.3  # S/R レベルの少し外側にSLを置く
+
         if pos.direction == "long":
             if current_price > pos.trailing_high:
                 pos.trailing_high = current_price
-                new_sl = current_price - trail_dist
-                if new_sl > pos.sl_price + min_step_price:
-                        ok = await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
-                        if ok:
-                            pos.sl_price = new_sl
-                            pos.last_trailing_update_utc = now_utc()
-                            logger.info(f"Trailing SL updated: {pos.pair} ticket={pos.ticket} new_sl={round(new_sl, 5)}")
-                        else:
-                            logger.error(f"Failed to update trailing SL: {pos.pair} ticket={pos.ticket}")
-                            await self._notifier.send(
-                                f"⚠️ Trailing SL更新失敗: {pos.pair} ticket={pos.ticket}",
-                                AlertLevel.WARNING,
-                            )
-        else:
+
+            # 構造的 SL 候補を収集
+            structural_sl = 0.0
+            if ctx and ctx.updated_at and elapsed_minutes(ctx.updated_at) <= 10:
+                candidates = []
+                # サポートライン (現在価格より下) の上に SL
+                if ctx.nearest_support > 0 and ctx.nearest_support < current_price:
+                    candidates.append(ctx.nearest_support - buffer)
+                # 直近スイング安値の下に SL
+                if ctx.swing_low > 0 and ctx.swing_low < current_price:
+                    candidates.append(ctx.swing_low - buffer)
+                # エントリー価格以上の候補のみ（利益保護）
+                valid = [c for c in candidates if c > pos.open_price]
+                if valid:
+                    structural_sl = max(valid)  # 最も高い（利益を守る）候補
+
+            # ATR トレーリング（フォールバック）
+            atr_trail_sl = pos.trailing_high - atr * risk.get("trailing_atr_multiplier", 0.8)
+
+            # 構造的 SL と ATR トレーリングの大きい方を採用
+            new_sl = max(structural_sl, atr_trail_sl)
+
+            if new_sl > pos.sl_price + min_step_price:
+                ok = await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
+                if ok:
+                    trail_type = "structural" if structural_sl >= atr_trail_sl else "atr"
+                    pos.sl_price = new_sl
+                    pos.last_trailing_update_utc = now_utc()
+                    logger.info(
+                        f"Trailing SL updated ({trail_type}): {pos.pair} "
+                        f"ticket={pos.ticket} new_sl={round(new_sl, 5)}"
+                    )
+                else:
+                    logger.error(f"Failed to update trailing SL: {pos.pair} ticket={pos.ticket}")
+                    await self._notifier.send(
+                        f"⚠️ Trailing SL更新失敗: {pos.pair} ticket={pos.ticket}",
+                        AlertLevel.WARNING,
+                    )
+        else:  # short
             if current_price < pos.trailing_low:
                 pos.trailing_low = current_price
-                new_sl = current_price + trail_dist
-                if new_sl < pos.sl_price - min_step_price:
-                        ok = await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
-                        if ok:
-                            pos.sl_price = new_sl
-                            pos.last_trailing_update_utc = now_utc()
-                            logger.info(f"Trailing SL updated: {pos.pair} ticket={pos.ticket} new_sl={round(new_sl, 5)}")
-                        else:
-                            logger.error(f"Failed to update trailing SL: {pos.pair} ticket={pos.ticket}")
-                            await self._notifier.send(
-                                f"⚠️ Trailing SL更新失敗: {pos.pair} ticket={pos.ticket}",
-                                AlertLevel.WARNING,
-                            )
+
+            structural_sl = float("inf")
+            if ctx and ctx.updated_at and elapsed_minutes(ctx.updated_at) <= 10:
+                candidates = []
+                if ctx.nearest_resistance > 0 and ctx.nearest_resistance > current_price:
+                    candidates.append(ctx.nearest_resistance + buffer)
+                if ctx.swing_high > 0 and ctx.swing_high > current_price:
+                    candidates.append(ctx.swing_high + buffer)
+                valid = [c for c in candidates if c < pos.open_price]
+                if valid:
+                    structural_sl = min(valid)
+
+            atr_trail_sl = pos.trailing_low + atr * risk.get("trailing_atr_multiplier", 0.8)
+
+            new_sl = min(structural_sl, atr_trail_sl)
+
+            if new_sl < pos.sl_price - min_step_price:
+                ok = await self._broker.modify_sl_tp_async(pos.ticket, sl=round(new_sl, 5))
+                if ok:
+                    trail_type = "structural" if structural_sl <= atr_trail_sl else "atr"
+                    pos.sl_price = new_sl
+                    pos.last_trailing_update_utc = now_utc()
+                    logger.info(
+                        f"Trailing SL updated ({trail_type}): {pos.pair} "
+                        f"ticket={pos.ticket} new_sl={round(new_sl, 5)}"
+                    )
+                else:
+                    logger.error(f"Failed to update trailing SL: {pos.pair} ticket={pos.ticket}")
+                    await self._notifier.send(
+                        f"⚠️ Trailing SL更新失敗: {pos.pair} ticket={pos.ticket}",
+                        AlertLevel.WARNING,
+                    )
 
     async def _force_close(self, pos: ManagedPosition, reason: str, close_price: float | None = None) -> None:
         """強制クローズ実行。"""
@@ -527,11 +739,18 @@ class PositionManager:
 
     def _estimate_pnl(self, pos: ManagedPosition, close_price: float) -> tuple[float, float]:
         """決済記録用の pips / 円損益を概算する。"""
-        pip_unit = 0.01 if pos.pair in ("USDJPY", "GBPJPY") else 0.0001
+        if pos.pair in ("USDJPY", "GBPJPY"):
+            pip_unit = 0.01
+            pip_value_per_mini_lot = 100
+        elif pos.pair in ("GOLD", "XAUUSD"):
+            pip_unit = 0.10
+            pip_value_per_mini_lot = 100
+        else:
+            pip_unit = 0.0001
+            pip_value_per_mini_lot = 110
         pnl_price = self._price_move_in_favor(pos, close_price)
         pnl_pips = pnl_price / pip_unit
 
-        pip_value_per_mini_lot = 100 if pos.pair in ("USDJPY", "GBPJPY") else 110
         pnl_jpy = pnl_pips * pip_value_per_mini_lot * (pos.volume / 0.01)
         return round(pnl_pips, 1), round(pnl_jpy, 0)
 

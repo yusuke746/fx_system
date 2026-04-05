@@ -125,6 +125,10 @@ class Orchestrator:
         # MCP EA ポジション管理（起動中のチケットセット）
         self._mcp_position_tickets: set[int] = set()
 
+        # MCP シグナル重複防止: {pair: last_processed_timestamp}
+        self._mcp_signal_cooldown: dict[str, float] = {}
+        _MCP_SIGNAL_COOLDOWN_SEC = 30  # 同一ペアの連続シグナルを30秒間ブロック
+
         # スケジューラ
         self._scheduler = AsyncIOScheduler(timezone=UTC)
 
@@ -427,7 +431,9 @@ class Orchestrator:
 
             try:
                 source = payload.get("signal_source")
-                if source == "mcp":
+                if source == "mcp_context":
+                    self._handle_mcp_context(payload)
+                elif source in ("mcp", "tv_alert"):
                     await self._process_mcp_signal(payload)
                 else:
                     await self._process_signal(payload)
@@ -436,6 +442,17 @@ class Orchestrator:
                 await self._notifier.send_alert(f"シグナル処理エラー: {e}")
 
     # ── MCP EA シグナル処理 ─────────────────────────────────────────────────────
+
+    def _handle_mcp_context(self, payload: dict) -> None:
+        """
+        tv_mcp_ea からの Market Context を受信し、
+        保有中ポジションのエグジット判断用データを更新する。
+        """
+        pair = payload.get("pair", "")
+        # GOLD → XAUUSD の正規化（MT5 シンボルが GOLD の場合）
+        # position_manager 内ではペア名でマッチするため、
+        # 登録時のペア名と一致させる必要がある
+        self._position_manager.update_market_context(pair, payload)
 
     def _count_mcp_positions(self, category: str | None = None) -> int:
         """現在アクティブな MCP ポジション数を返す。"""
@@ -491,6 +508,15 @@ class Orchestrator:
         breakout_score = int(payload.get("breakout_score", 0))
         pattern = str(payload.get("pattern", "unknown"))
 
+        # ⓪ 同一ペア重複防止（同時アラート発火対策）
+        import time as _time
+        now_ts = _time.time()
+        last_ts = self._mcp_signal_cooldown.get(pair, 0)
+        if now_ts - last_ts < 30:
+            logger.info(f"[MCP] Signal cooldown active for {pair} ({now_ts - last_ts:.0f}s ago)")
+            return
+        self._mcp_signal_cooldown[pair] = now_ts
+
         mcp_cfg = self._config.get("mcp_ea", {})
         if not bool(mcp_cfg.get("enabled", True)):
             logger.info("MCP EA disabled in config")
@@ -526,6 +552,11 @@ class Orchestrator:
                 from ml.lgbm_model import build_features
                 now = now_utc()
                 jst_now = to_jst(now)
+                # MCP indicators（テクニカル指標）を payload にマージ
+                # → build_features() が smc_data / market_data 両方から参照可能にする
+                #   (trend_direction, momentum_long/short は smc_data から読まれるため)
+                ind = payload.get("indicators", {})
+                payload.update(ind)
                 market_data = {**payload, "atr_14": atr, "spread_pips": 1.5}
                 position_data = {
                     "open_positions_count": len(self._position_manager.positions),
@@ -610,6 +641,8 @@ class Orchestrator:
                 prob_flat=0.0,
                 prob_down=0.0,
                 last_prediction_at_utc=now_utc(),
+                is_mcp=True,
+                entry_htf_bias=direction,  # ブレイクアウト方向 = HTF バイアス方向と推定
             ))
             self._mcp_position_tickets.add(ticket)
 

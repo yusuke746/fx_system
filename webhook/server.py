@@ -148,6 +148,146 @@ async def receive_mcp_webhook(request: Request):
     return {"status": "ok", "received_at": payload["received_at_utc"]}
 
 
+@app.post("/webhook/mcp_context")
+async def receive_mcp_context(request: Request):
+    """
+    tv_mcp_ea からの Market Context 更新を受信する。
+
+    5分毎に全ペアの S/R レベル・スイング高安・EMA 方向を受け取り、
+    保有中ポジションのエグジット判断に活用する。
+    エントリーは発生しない（キューに入るが signal_source="mcp_context" で分岐する）。
+    """
+    client_ip = _get_client_ip(request)
+    if _blocked_ip_cache.get(client_ip):
+        raise HTTPException(status_code=429, detail="Too many invalid auth attempts")
+
+    settings = get_settings()
+    if not _is_ip_allowed(client_ip, settings):
+        raise HTTPException(status_code=403, detail="IP not allowed")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    secret = settings.webhook_secret.get_secret_value()
+    provided_token = str(payload.get("webhook_token", ""))
+    if secret and not hmac.compare_digest(provided_token, secret):
+        _record_auth_failure(client_ip)
+        raise HTTPException(status_code=429, detail="Webhook token verification failed")
+
+    required = ["pair", "signal_source", "current_price", "atr"]
+    missing = [f for f in required if f not in payload]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing fields: {missing}")
+
+    if payload.get("signal_source") != "mcp_context":
+        raise HTTPException(status_code=400, detail="Invalid signal_source")
+
+    pair = payload["pair"]
+    if pair not in ("USDJPY", "EURUSD", "GBPJPY", "XAUUSD", "GOLD"):
+        raise HTTPException(status_code=400, detail=f"Unsupported pair: {pair}")
+
+    payload["received_at_utc"] = now_utc().isoformat()
+
+    logger.debug(
+        f"MCP Context received: {pair} "
+        f"res={payload.get('nearest_resistance')} sup={payload.get('nearest_support')} "
+        f"bias={payload.get('htf_bias')}"
+    )
+
+    signal_queue = get_queue()
+    await signal_queue.put(payload)
+
+    return {"status": "ok", "received_at": payload["received_at_utc"]}
+
+
+@app.post("/webhook/tv_alert")
+async def receive_tv_alert(request: Request):
+    """
+    TradingView アラート webhook を受信する。
+
+    tv_mcp_ea が設定した TV アラートが発火すると、TradingView が
+    アラートメッセージの JSON 部分を body として POST する。
+    ローカルの tv_mcp_ea からの直接 POST にも対応する。
+
+    期待されるメッセージ形式:
+    [MCP-EA] XAUUSD long @ 3050.00000
+    {"signal_source": "tv_alert", "pair": "XAUUSD", "direction": "long", ...}
+    """
+    client_ip = _get_client_ip(request)
+    if _blocked_ip_cache.get(client_ip):
+        raise HTTPException(status_code=429, detail="Too many invalid auth attempts")
+
+    settings = get_settings()
+
+    try:
+        body = await request.body()
+        text = body.decode("utf-8").strip()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid body")
+
+    # TV アラートは plain text で送信される場合がある — JSON 部分を抽出
+    payload = None
+    import json as _json
+
+    # Case 1: 全体が JSON
+    try:
+        payload = _json.loads(text)
+    except _json.JSONDecodeError:
+        pass
+
+    # Case 2: 複数行で 2行目以降に JSON
+    if payload is None:
+        for line in text.split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    payload = _json.loads(line)
+                    break
+                except _json.JSONDecodeError:
+                    continue
+
+    if payload is None:
+        raise HTTPException(status_code=400, detail="No JSON payload found in alert message")
+
+    # トークン認証（ローカル POST の場合）
+    secret = settings.webhook_secret.get_secret_value()
+    provided_token = str(payload.get("webhook_token", ""))
+    if secret and provided_token:
+        if not hmac.compare_digest(provided_token, secret):
+            _record_auth_failure(client_ip)
+            raise HTTPException(status_code=429, detail="Webhook token verification failed")
+
+    if payload.get("signal_source") != "tv_alert":
+        raise HTTPException(status_code=400, detail="Invalid signal_source for tv_alert endpoint")
+
+    required = ["pair", "direction", "pattern_level", "atr"]
+    missing = [f for f in required if f not in payload]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing fields: {missing}")
+
+    pair = payload["pair"]
+    if pair not in ("USDJPY", "EURUSD", "GBPJPY", "XAUUSD", "GOLD"):
+        raise HTTPException(status_code=400, detail=f"Unsupported pair: {pair}")
+
+    # breakout_score がない場合のデフォルト（TV アラートには score がない）
+    payload.setdefault("breakout_score", 7)
+    payload.setdefault("close", payload["pattern_level"])
+    payload["signal_source"] = "tv_alert"
+    payload["received_at_utc"] = now_utc().isoformat()
+
+    logger.info(
+        f"TV Alert received: {pair} {payload['direction']} "
+        f"@ {payload.get('pattern_level')} pattern={payload.get('pattern')}"
+    )
+
+    signal_queue = get_queue()
+    await signal_queue.put(payload)
+
+    return {"status": "ok", "received_at": payload["received_at_utc"]}
+
+
 @app.get("/health")
 async def health():
     """ヘルスチェック用エンドポイント。"""

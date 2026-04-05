@@ -1,6 +1,6 @@
 ﻿# FX自動売買システム v2.3
 
-**対象通貨:** USD/JPY · EUR/USD · GBP/JPY  
+**対象通貨:** USD/JPY · EUR/USD · GBP/JPY（Pine Script 経由）+ XAU/USD（tv_mcp_ea 経由）  
 **実行環境:** Windows VPS（常時稼働）  
 **ブローカー:** XMTrading KIWA極口座  
 
@@ -39,7 +39,7 @@ fx_system/
 │   └── trainer.py          # 学習・ウォークフォワード・PSIドリフト検知
 │
 ├── webhook/                # Webhook受信
-│   ├── server.py           # FastAPI + JSON共有トークン照合
+│   ├── server.py           # FastAPI + JSON共有トークン照合（/webhook + /webhook/mcp）
 │   └── signal_queue.py     # 非同期シグナルキュー
 │
 ├── optimizer/              # 自動最適化
@@ -232,6 +232,9 @@ dir models\lgbm_*_metrics.json
 | USDJPY | `usdjpy` | `http://YOUR_VPS_IP:8000/webhook` |
 | EURUSD | `eurusd` | `http://YOUR_VPS_IP:8000/webhook` |
 | GBPJPY | `gbpjpy` | `http://YOUR_VPS_IP:8000/webhook` |
+
+> XAU/USD は Pine Script アラートではなく `tv_mcp_ea` から `/webhook/mcp` 経由で受信します。  
+> 詳細は [tv_mcp_ea 統合](#tv_mcp_ea-統合mcp-経由のパターン検出--xauusd-対応) を参照してください。
 
 アラートの設定:
 - 条件: **`Any alert() function call`**
@@ -485,6 +488,83 @@ python maintenance/check_training_samples.py --pair USDJPY --json
 6. `i_webhook_token` に `.env` の `WEBHOOK_SECRET` と同じ値を設定
 7. `i_alert_mode` は **`ml_first`（推奨）** を選択（Pine側の過剰ゲートを避け、LightGBM中心で判定）
 8. 通貨ペアごとに `i_pair` パラメータを変更して3つのアラートを設定
+
+## tv_mcp_ea 統合（MCP 経由のパターン検出 + XAU/USD 対応）
+
+本システムは [tv_mcp_ea](https://github.com/yusuke746/tv_mcp_ea) からの MCP シグナルを `/webhook/mcp` エンドポイントで受信し、独立したポジション枠で管理します。
+
+### シグナルフロー
+
+```
+tv_mcp_ea (5分毎スキャン)
+  → TradingView CDP でパターン検出
+  → GPT-5-mini で品質スコアリング
+  → 10点ブレイクアウト判定 (≥7 で発火)
+  → POST /webhook/mcp
+        │
+fx_system
+  → signal_source="mcp" → _process_mcp_signal()
+  → Calendar Veto → 時間フィルター
+  → MCP ポジション上限 (FX:1 / GOLD:1)
+  → FX のみ LightGBM 逆方向ブロック (GOLD はスキップ)
+  → ATR ベース SL/TP → MT5 発注
+```
+
+### Webhook エンドポイント
+
+| パス | ソース | 対象ペア |
+|------|--------|----------|
+| `/webhook` | TradingView Pine Script | USDJPY / EURUSD / GBPJPY |
+| `/webhook/mcp` | tv_mcp_ea | USDJPY / EURUSD / GBPJPY / XAUUSD |
+
+### ポジション枠の分離
+
+| 枠 | 最大数 | 対象 |
+|---|---|---|
+| Pine 枠 | MAX_POSITIONS=5 | USDJPY / EURUSD / GBPJPY |
+| MCP FX 枠 | 1 | USDJPY / EURUSD / GBPJPY |
+| MCP GOLD 枠 | 1 | XAUUSD |
+
+Pine 枠と MCP 枠は完全に独立。MCP で開いたポジションは `_mcp_position_tickets` で MT5 チケット番号を追跡します。
+
+### GOLD (XAU/USD) 固有設定
+
+| 項目 | 値 |
+|---|---|
+| MT5 シンボル名 | `GOLD`（XMTrading での登録名） |
+| pip_unit | 0.10 |
+| SL/TP 倍率 | ATR × 2.5 |
+| ロットスケール | FX の 0.5 倍 |
+| LightGBM | スキップ（モデル未整備） |
+
+### config.json `mcp_ea` セクション
+
+```json
+"mcp_ea": {
+  "enabled": true,
+  "max_positions": 2,
+  "max_fx_positions": 1,
+  "max_gold_positions": 1,
+  "fx_tp_atr_mult": 2.0,
+  "fx_sl_atr_mult": 1.5,
+  "gold_tp_atr_mult": 2.5,
+  "gold_sl_atr_mult": 2.5,
+  "gold_lot_scale": 0.5,
+  "magic_number": 20250001,
+  "comment_tag": "mcp_ea"
+}
+```
+
+### 変更されたファイル
+
+| ファイル | 変更内容 |
+|---|---|
+| `webhook/server.py` | `/webhook/mcp` エンドポイント追加（XAUUSD 対応） |
+| `main.py` | `_process_mcp_signal()` / `_count_mcp_positions()` / `_calc_mcp_sl_tp_pips()` 追加 |
+| `broker/mt5_broker.py` | GOLD `pip_unit = 0.10` 対応 |
+| `config.json` | `mcp_ea` セクション追加 |
+
+---
 
 ## プレローンチチェックリスト
 
