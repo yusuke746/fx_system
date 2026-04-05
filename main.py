@@ -408,7 +408,7 @@ class Orchestrator:
         direction = str(trade_row.get("direction") or "")
         open_price = float(trade_row.get("open_price") or 0.0)
         volume = float(trade_row.get("volume") or 0.0)
-        pip_unit = 0.01 if pair in ("USDJPY", "GBPJPY") else 0.0001
+        pip_unit = 0.01 if pair in ("USDJPY", "GBPJPY") else (0.10 if "XAU" in pair or "XAG" in pair or pair == "GOLD" else 0.0001)
 
         pnl_price = (close_price - open_price) if direction == "long" else (open_price - close_price)
         pnl_pips = pnl_price / pip_unit
@@ -460,7 +460,7 @@ class Orchestrator:
         mcp_active = self._mcp_position_tickets & active_tickets
         if category is None:
             return len(mcp_active)
-        gold_pairs = {"XAUUSD", "XAUEUR", "XAGUSDUSD"}
+        gold_pairs = {"XAUUSD", "XAUEUR", "XAGUSDUSD", "GOLD"}
         count = 0
         for t in mcp_active:
             pos = self._position_manager.positions[t]
@@ -474,7 +474,7 @@ class Orchestrator:
     def _calc_mcp_sl_tp_pips(self, pair: str, atr: float) -> tuple[float, float]:
         """MCP 設定の ATR 倍率から SL/TP を pips で返す。"""
         mcp_cfg = self._config.get("mcp_ea", {})
-        is_gold = "XAU" in pair or "XAG" in pair
+        is_gold = "XAU" in pair or "XAG" in pair or pair == "GOLD"
         if is_gold:
             sl_mult = float(mcp_cfg.get("gold_sl_atr_mult", 2.5))
             tp_mult = float(mcp_cfg.get("gold_tp_atr_mult", 2.5))
@@ -539,7 +539,7 @@ class Orchestrator:
             return
 
         # ③ MCP ポジション上限確認
-        is_gold = "XAU" in pair or "XAG" in pair
+        is_gold = "XAU" in pair or "XAG" in pair or pair == "GOLD"
         category = "gold" if is_gold else "fx"
         max_cat = int(mcp_cfg.get(f"max_{category}_positions", 1))
         if self._count_mcp_positions(category) >= max_cat:
