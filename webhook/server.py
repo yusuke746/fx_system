@@ -61,7 +61,8 @@ async def receive_webhook(request: Request):
 
     try:
         payload = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to parse JSON from {client_ip}: {e}")
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
     # 共有トークン検証（JSON内）
@@ -76,6 +77,10 @@ async def receive_webhook(request: Request):
     required = ["pair", "direction", "mtf_confluence", "atr", "close"]
     missing = [f for f in required if f not in payload]
     if missing:
+        logger.warning(
+            f"Webhook missing required fields from {client_ip}: {missing} "
+            f"(received: {list(payload.keys())})"
+        )
         raise HTTPException(status_code=400, detail=f"Missing fields: {missing}")
 
     pair = payload["pair"]
