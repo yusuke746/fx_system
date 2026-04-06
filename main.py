@@ -527,7 +527,7 @@ class Orchestrator:
                 f"[EXIT ALERT] Unknown exit_type='{exit_type}' for {pair} — skipping close"
             )
 
-
+    def _count_mcp_positions(self, category: str | None = None) -> int:
         """現在アクティブな MCP ポジション数を返す。"""
         active_tickets = set(self._position_manager.positions.keys())
         mcp_active = self._mcp_position_tickets & active_tickets
