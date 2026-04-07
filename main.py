@@ -619,50 +619,49 @@ class Orchestrator:
             logger.info(f"[MCP] Position limit reached for {category}")
             return
 
-        # ④ FX ペアのみ LightGBM 確認（モデル不在時はスキップ）
+        # ④ FX ペアのみ LightGBM 必須ゲート（Gold はモデルなしのためスキップ）
         if not is_gold:
-            try:
-                from ml.lgbm_model import build_features
-                now = now_utc()
-                jst_now = to_jst(now)
-                # MCP indicators（テクニカル指標）を payload にマージ
-                # → build_features() が smc_data / market_data 両方から参照可能にする
-                #   (trend_direction, momentum_long/short は smc_data から読まれるため)
-                ind = payload.get("indicators", {})
-                payload.update(ind)
-                market_data = {**payload, "atr_14": atr, "spread_pips": 1.5}
-                position_data = {
-                    "open_positions_count": len(self._position_manager.positions),
-                }
-                detector = self._diff_detectors.setdefault(pair, DiffDetector())
-                cached = detector.cached_result
-                sentiment_score = float(cached.sentiment_score if cached else 0.0)
-                calendar_risk_score = 0
+            from ml.lgbm_model import build_features
+            now = now_utc()
+            ind = payload.get("indicators", {})
+            payload.update(ind)
+            market_data = {**payload, "atr_14": atr, "spread_pips": 1.5}
+            position_data = {
+                "open_positions_count": len(self._position_manager.positions),
+            }
+            detector = self._diff_detectors.setdefault(pair, DiffDetector())
+            cached = detector.cached_result
+            sentiment_score = float(cached.sentiment_score if cached else 0.0)
+            calendar_risk_score = 0
 
-                features = build_features(
-                    smc_data=payload,
-                    market_data=market_data,
-                    position_data=position_data,
-                    sentiment_score=sentiment_score,
-                    calendar_risk_score=calendar_risk_score,
-                    session_type=get_session_flag(now),
-                    day_of_week=now.weekday(),
+            features = build_features(
+                smc_data=payload,
+                market_data=market_data,
+                position_data=position_data,
+                sentiment_score=sentiment_score,
+                calendar_risk_score=calendar_risk_score,
+                session_type=get_session_flag(now),
+                day_of_week=now.weekday(),
+            )
+            prediction = self._predictor.predict(pair, features)
+            if prediction is None:
+                logger.info(f"[MCP] Rejected: LightGBM model unavailable for {pair}")
+                return
+            model_accuracy = self._predictor.get_model_accuracy(pair)
+            ml_cfg = self._config.get("ml", {})
+            threshold_overrides = ml_cfg.get("prediction_thresholds", {}).get(pair)
+            if not prediction.is_strong_signal(direction, model_accuracy, threshold_overrides):
+                logger.info(
+                    f"[MCP] Rejected by LightGBM: {pair} {direction} "
+                    f"up={prediction.prob_up:.3f} flat={prediction.prob_flat:.3f} "
+                    f"down={prediction.prob_down:.3f} accuracy={model_accuracy:.3f}"
                 )
-                prediction = self._predictor.predict(pair, features)
-                if prediction is not None:
-                    # LightGBM が逆方向に強い場合のみブロック
-                    if direction == "long" and prediction.prob_down > 0.55:
-                        logger.info(
-                            f"[MCP] Blocked by LightGBM: down={prediction.prob_down:.2f}"
-                        )
-                        return
-                    if direction == "short" and prediction.prob_up > 0.55:
-                        logger.info(
-                            f"[MCP] Blocked by LightGBM: up={prediction.prob_up:.2f}"
-                        )
-                        return
-            except Exception as e:
-                logger.warning(f"[MCP] LightGBM check skipped: {e}")
+                return
+            logger.info(
+                f"[MCP] LightGBM passed: {pair} {direction} "
+                f"up={prediction.prob_up:.3f} flat={prediction.prob_flat:.3f} "
+                f"down={prediction.prob_down:.3f}"
+            )
 
         # ⑤ SL/TP 計算
         sl_pips, tp_pips = self._calc_mcp_sl_tp_pips(pair, atr)
