@@ -45,7 +45,10 @@
     "trailing_atr_multiplier": 1.2,
     "trailing_update_cooldown_seconds": 120,
     "trailing_min_step_pips": 4.0,
-    "doten_interval_seconds": 3600
+    "trailing_start_atr_min": 0.3,
+    "doten_interval_seconds": 3600,
+    "bias_reversal_min_minutes": 30,
+    "bias_reversal_confirm_count": 2
   },
   "ml": {
     "label_horizon_minutes": 240,

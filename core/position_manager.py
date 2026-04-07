@@ -84,6 +84,8 @@ class ManagedPosition:
     is_mcp: bool = False
     # エントリー時の HTF バイアス（トレンド反転検知用）
     entry_htf_bias: str = ""
+    # HTF バイアス反転の連続検出カウンタ（ちらつきノイズ除去用）
+    bias_reversal_streak: int = 0
 
 
 class PositionManager:
@@ -313,9 +315,21 @@ class PositionManager:
             # 優先2: ATR動的SL到達（MT5 OCO注文）
 
             # 優先3: HTFバイアス反転（MCP + market_ctx ありの場合のみ）
-            if self._should_exit_bias_reversal(pos):
-                await self._force_close(pos, "bias_reversal", current_price)
-                continue
+            # 複数回の連続検出で初めて発火（ちらつきノイズ除去）
+            reversal_now = self._should_exit_bias_reversal(pos)
+            if reversal_now:
+                pos.bias_reversal_streak += 1
+                confirm_count = int(risk.get("bias_reversal_confirm_count", 2))
+                if pos.bias_reversal_streak >= confirm_count:
+                    await self._force_close(pos, "bias_reversal", current_price)
+                    continue
+                else:
+                    logger.info(
+                        f"Bias reversal pending: {pos.pair} ticket={pos.ticket} "
+                        f"streak={pos.bias_reversal_streak}/{confirm_count}"
+                    )
+            else:
+                pos.bias_reversal_streak = 0
 
             # 優先4: time_decay（時間切れ撤退）
             if self._should_exit_time_decay(pos, current_price, risk):
@@ -353,8 +367,10 @@ class PositionManager:
         # コンテキストが10分以上古い場合は無効（tv_mcp_ea が停止している可能性）
         if elapsed_minutes(pos.market_ctx.updated_at) > 10:
             return False
-        # 最低保持時間
-        if elapsed_minutes(pos.open_time_utc) < 15:
+        # 最低保持時間（config で調整可能）
+        config = get_trading_config()
+        min_minutes = float(config.get("risk", {}).get("bias_reversal_min_minutes", 30))
+        if elapsed_minutes(pos.open_time_utc) < min_minutes:
             return False
         # エントリー時のバイアスが未記録なら判定不能
         if not pos.entry_htf_bias or pos.entry_htf_bias == "neutral":
@@ -437,6 +453,16 @@ class PositionManager:
         ctx = pos.market_ctx
         atr = ctx.current_atr if (ctx and ctx.current_atr > 0) else pos.atr_at_entry
         buffer = atr * 0.3  # S/R レベルの少し外側にSLを置く
+
+        # エントリーから最低前進量に達するまでトレーリングを発動しない
+        # （エントリー直後の immediate tighten 防止）
+        trailing_start_atr_min = float(risk.get("trailing_start_atr_min", 0.3))
+        forward_move = (
+            (current_price - pos.open_price) if pos.direction == "long"
+            else (pos.open_price - current_price)
+        )
+        if forward_move < atr * trailing_start_atr_min:
+            return
 
         if pos.direction == "long":
             if current_price > pos.trailing_high:
