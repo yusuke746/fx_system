@@ -613,6 +613,11 @@ class Orchestrator:
 
         # ③ MCP ポジション上限確認
         is_gold = "XAU" in pair or "XAG" in pair or pair == "GOLD"
+
+        # Gold取引無効化チェック（データ収集は継続）
+        if is_gold and not bool(mcp_cfg.get("gold_trading_enabled", True)):
+            logger.info(f"[MCP] Gold trading disabled — skipping entry for {pair}")
+            return
         category = "gold" if is_gold else "fx"
         max_cat = int(mcp_cfg.get(f"max_{category}_positions", 1))
         if self._count_mcp_positions(category) >= max_cat:
@@ -747,6 +752,11 @@ class Orchestrator:
         self._last_webhook_atrs[pair] = (atr, atr_20d_avg)
 
         logger.info(f"Processing signal: {pair} {signal_direction} ATR={atr} avg_atr_20d={atr_20d_avg}")
+
+        # Gold取引無効化チェック（training_sampleへの保存は後続で継続する）
+        _is_gold_pair = "XAU" in pair or "XAG" in pair or pair == "GOLD"
+        _gold_trading_enabled = bool(self._config.get("mcp_ea", {}).get("gold_trading_enabled", True))
+        _gold_disabled = _is_gold_pair and not _gold_trading_enabled
 
         # ② Calendar Veto（Layer A）
         veto_active, veto_reason = self._calendar_veto.is_veto_active(pair)
@@ -885,6 +895,11 @@ class Orchestrator:
             })
         except Exception as e:
             logger.warning(f"Training sample insert failed: {e}")
+
+        # Gold取引無効時はデータ収集まで完了させて発注をスキップ
+        if _gold_disabled:
+            logger.info(f"[SIGNAL] Gold trading disabled — data collected, skipping entry for {pair}")
+            return
 
         features = build_features(
             smc_data=payload,

@@ -165,6 +165,7 @@
   },
   "mcp_ea": {
     "enabled": true,
+    "gold_trading_enabled": false,
     "max_positions": 2,
     "max_fx_positions": 1,
     "max_gold_positions": 1,
