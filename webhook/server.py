@@ -276,12 +276,23 @@ async def receive_tv_alert(request: Request):
     if pair not in ("USDJPY", "EURUSD", "GBPJPY", "XAUUSD", "GOLD"):
         raise HTTPException(status_code=400, detail=f"Unsupported pair: {pair}")
 
-    # breakout_score がない場合のデフォルト（TV アラートには score がない）
-    payload.setdefault("breakout_score", 7)
-    payload.setdefault("close", payload["pattern_level"])
-    # exit_alert の場合は signal_source をそのまま維持する
-    if payload.get("signal_source") != "exit_alert":
-        payload["signal_source"] = "tv_alert"
+    if payload.get("signal_source") == "exit_alert":
+        payload.setdefault("close", payload["pattern_level"])
+    else:
+        if not payload.get("indicators"):
+            logger.info(
+                f"TV Alert ignored [tv_alert]: {pair} {payload['direction']} "
+                f"@ {payload.get('pattern_level')} pattern={payload.get('pattern')} "
+                f"reason=missing_indicators"
+            )
+            return {
+                "status": "ignored",
+                "reason": "tv_alert_missing_indicators",
+                "received_at": now_utc().isoformat(),
+            }
+        payload.setdefault("close", payload["pattern_level"])
+        payload.setdefault("breakout_score", 0)
+
     payload["received_at_utc"] = now_utc().isoformat()
 
     source_label = payload["signal_source"]

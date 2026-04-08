@@ -576,6 +576,7 @@ class Orchestrator:
         """
         pair = payload["pair"]
         direction = payload["direction"]
+        signal_source = str(payload.get("signal_source", "mcp"))
         atr = float(payload["atr"])
         close_price = float(payload["close"])
         breakout_score = int(payload.get("breakout_score", 0))
@@ -629,6 +630,9 @@ class Orchestrator:
             from ml.lgbm_model import build_features
             now = now_utc()
             ind = payload.get("indicators", {})
+            if signal_source == "tv_alert" and not ind:
+                logger.info(f"[MCP] Rejected: tv_alert missing indicators for {pair}")
+                return
             payload.update(ind)
             market_data = {**payload, "atr_14": atr, "spread_pips": 1.5}
             position_data = {
@@ -654,7 +658,12 @@ class Orchestrator:
                 return
             model_accuracy = self._predictor.get_model_accuracy(pair)
             ml_cfg = self._config.get("ml", {})
-            threshold_overrides = ml_cfg.get("prediction_thresholds", {}).get(pair)
+            execution_direction_mode = str(ml_cfg.get("execution_direction_mode", "signal")).lower()
+            if execution_direction_mode == "model" and prediction.direction != "flat":
+                direction = prediction.direction
+
+            pair_thresholds = ml_cfg.get("prediction_thresholds", {}).get(pair, {})
+            threshold_overrides = pair_thresholds.get(direction)
             if not prediction.is_strong_signal(direction, model_accuracy, threshold_overrides):
                 logger.info(
                     f"[MCP] Rejected by LightGBM: {pair} {direction} "
@@ -726,7 +735,11 @@ class Orchestrator:
             await self._notifier.send(
                 f"[MCP EA] 新規エントリー: {pair} {direction}\n"
                 f"Lot: {lot} / SL: {sl_price} / TP: {tp_price}\n"
-                f"Pattern: {pattern} (score {breakout_score}/10)"
+                + (
+                    f"Pattern: {pattern} (TV alert gated by LightGBM)"
+                    if signal_source == "tv_alert"
+                    else f"Pattern: {pattern} (score {breakout_score}/10)"
+                )
             )
         elif not ok:
             logger.error(f"[MCP] Order failed for {pair}")
