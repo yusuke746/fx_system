@@ -1,7 +1,7 @@
 """
 LightGBM 特徴量エンジニアリング・推論モジュール
 
-■ 38特徴量（MTF SMC v2.3 センサー拡張版）
+■ 43特徴量（MTF SMC v2.3 + LLM市場環境拡張版）
 
     SMCフラグ(8): fvg_4h_zone_active, ob_4h_zone_active, liq_sweep_1h,
                                  liq_sweep_qualified, bos_1h, choch_1h,
@@ -18,7 +18,9 @@ LightGBM 特徴量エンジニアリング・推論モジュール
                                  sweep_pending_bars
   リスク・ポジション系(4): open_positions_count, max_dd_24h,
                  calendar_risk_score, sentiment_score
-  セッション補助(2): session_type, day_of_week
+    LLM市場環境(5): risk_appetite_score, usd_macro_score,
+                                 jpy_macro_score, oil_shock_score, geopolitical_risk_score
+    セッション補助(2): session_type, day_of_week
 
 ■ 時刻基準
     - 全特徴量は保存基準（UTC）の signal_time に紐づけて管理
@@ -78,12 +80,18 @@ FEATURE_NAMES = [
     "max_dd_24h",
     "calendar_risk_score",
     "sentiment_score",
+    # LLM市場環境 (5)
+    "risk_appetite_score",
+    "usd_macro_score",
+    "jpy_macro_score",
+    "oil_shock_score",
+    "geopolitical_risk_score",
     # セッション補助 (2)
     "session_type",
     "day_of_week",
 ]
 
-assert len(FEATURE_NAMES) == 38, f"Expected 38 features, got {len(FEATURE_NAMES)}"
+assert len(FEATURE_NAMES) == 43, f"Expected 43 features, got {len(FEATURE_NAMES)}"
 
 # LightGBM 学習パラメータ（デフォルト値）
 LGBM_PARAMS = {
@@ -210,11 +218,13 @@ def build_features(
     position_data: dict,
     sentiment_score: float = 0.0,
     calendar_risk_score: int = 0,
+    llm_features: dict | None = None,
     session_type: int = 0,
     day_of_week: int = 0,
+    pair: str | None = None,
 ) -> np.ndarray:
     """
-    38特徴量ベクトルを構築する。
+    43特徴量ベクトルを構築する。
 
     Args:
         smc_data: TradingView Webhook から受け取った SMC データ
@@ -222,12 +232,25 @@ def build_features(
         position_data: 現在のポジション情報
         sentiment_score: GPT-5.2 出力のセンチメントスコア
         calendar_risk_score: 経済指標リスクスコア (0/1/2)
+        llm_features: LLM が解釈した市場環境の構造化特徴量
         session_type: セッション種別 (0=other, 1=london, 2=ny, 3=overlap)
         day_of_week: 曜日 (0=月, ..., 6=日)
+        pair: 通貨ペア (USDJPY/EURUSD/GBPJPY) - macro 特徴量のスケーリング用
 
     Returns:
-        shape=(1, 38) の numpy 配列
+        shape=(1, 43) の numpy 配列
     """
+    llm_features = llm_features or {}
+    
+    # ペア別 macro 特徴量スケーリング（EURUSD では jpy_macro を減衰）
+    if pair:
+        config = get_trading_config()
+        scaling = config.get("ml", {}).get("llm_macro_scaling_per_pair", {}).get(pair)
+        if scaling:
+            for feat_name, scale_factor in scaling.items():
+                if feat_name in llm_features:
+                    llm_features[feat_name] = llm_features[feat_name] * scale_factor
+
     features = [
         # SMC フラグ (8)
         int(smc_data.get("fvg_4h_zone_active", False)),
@@ -271,6 +294,12 @@ def build_features(
         position_data.get("max_dd_24h", 0.0),
         calendar_risk_score,
         sentiment_score,
+        # LLM市場環境 (5)
+        llm_features.get("risk_appetite_score", 0.0),
+        llm_features.get("usd_macro_score", 0.0),
+        llm_features.get("jpy_macro_score", 0.0),
+        llm_features.get("oil_shock_score", 0.0),
+        llm_features.get("geopolitical_risk_score", 0.0),
         # セッション補助 (2)
         session_type,
         day_of_week,
@@ -334,7 +363,7 @@ class LGBMPredictor:
 
         Args:
             pair: 通貨ペア
-            features: shape=(1, 35) の特徴量配列  # noqa (35 = FEATURE_NAMES size)
+            features: shape=(1, len(FEATURE_NAMES)) の特徴量配列
 
         Returns:
             PredictionResult or None（モデル未読み込み時）

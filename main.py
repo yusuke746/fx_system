@@ -135,6 +135,34 @@ class Orchestrator:
         # LLMエラー通知のスロットリング
         self._last_llm_model_error_notify = None
 
+    def _resolve_llm_feature_context(self, cached_result) -> tuple[float, int, dict[str, float]]:
+        """LLMキャッシュを LightGBM 用の数値特徴量へ正規化する。"""
+        llm_cfg = self._config.get("llm", {})
+        feature_threshold = float(llm_cfg.get("feature_news_importance_threshold", 0.55))
+
+        if cached_result is None:
+            return 0.0, 0, {
+                "risk_appetite_score": 0.0,
+                "usd_macro_score": 0.0,
+                "jpy_macro_score": 0.0,
+                "oil_shock_score": 0.0,
+                "geopolitical_risk_score": 0.0,
+            }
+
+        importance = float(getattr(cached_result, "news_importance_score", 0.0) or 0.0)
+        features_enabled = importance >= feature_threshold
+        sentiment_score = float(getattr(cached_result, "sentiment_score", 0.0) or 0.0) if features_enabled else 0.0
+        calendar_risk_score = 2 if bool(getattr(cached_result, "unexpected_veto", False)) else (1 if features_enabled else 0)
+
+        llm_features = {
+            "risk_appetite_score": float(getattr(cached_result, "risk_appetite_score", 0.0) or 0.0) if features_enabled else 0.0,
+            "usd_macro_score": float(getattr(cached_result, "usd_macro_score", 0.0) or 0.0) if features_enabled else 0.0,
+            "jpy_macro_score": float(getattr(cached_result, "jpy_macro_score", 0.0) or 0.0) if features_enabled else 0.0,
+            "oil_shock_score": float(getattr(cached_result, "oil_shock_score", 0.0) or 0.0) if features_enabled else 0.0,
+            "geopolitical_risk_score": float(getattr(cached_result, "geopolitical_risk_score", 0.0) or 0.0) if features_enabled else 0.0,
+        }
+        return sentiment_score, calendar_risk_score, llm_features
+
     async def start(self) -> None:
         """システムを起動する。"""
         logger.info(f"=== FX Auto-Trading System v{self._config['system']['version']} ===")
@@ -640,8 +668,7 @@ class Orchestrator:
             }
             detector = self._diff_detectors.setdefault(pair, DiffDetector())
             cached = detector.cached_result
-            sentiment_score = float(cached.sentiment_score if cached else 0.0)
-            calendar_risk_score = 0
+            sentiment_score, calendar_risk_score, llm_features = self._resolve_llm_feature_context(cached)
 
             features = build_features(
                 smc_data=payload,
@@ -649,8 +676,10 @@ class Orchestrator:
                 position_data=position_data,
                 sentiment_score=sentiment_score,
                 calendar_risk_score=calendar_risk_score,
+                llm_features=llm_features,
                 session_type=get_session_flag(now),
                 day_of_week=now.weekday(),
+                pair=pair,
             )
             prediction = self._predictor.predict(pair, features)
             if prediction is None:
@@ -797,11 +826,7 @@ class Orchestrator:
         # ③ GPT-5.2 キャッシュ読込（Veto Layer B）
         detector = self._diff_detectors.setdefault(pair, DiffDetector())
         cached = detector.cached_result
-        llm_cfg = self._config.get("llm", {})
-        feature_threshold = float(llm_cfg.get("feature_news_importance_threshold", 0.55))
-        importance = cached.news_importance_score if cached else 0.0
-        sentiment_score = cached.sentiment_score if cached and importance >= feature_threshold else 0.0
-        calendar_risk_score = 2 if (cached and cached.unexpected_veto) else (1 if importance >= feature_threshold else 0)
+        sentiment_score, calendar_risk_score, llm_features = self._resolve_llm_feature_context(cached)
         if cached and cached.unexpected_veto:
             logger.info("Signal vetoed by GPT unexpected_veto flag")
             insert_signal(self._db_conn, {
@@ -900,6 +925,11 @@ class Orchestrator:
                 "max_dd_24h": 0.0,
                 "calendar_risk_score": calendar_risk_score,
                 "sentiment_score": sentiment_score,
+                "risk_appetite_score": llm_features["risk_appetite_score"],
+                "usd_macro_score": llm_features["usd_macro_score"],
+                "jpy_macro_score": llm_features["jpy_macro_score"],
+                "oil_shock_score": llm_features["oil_shock_score"],
+                "geopolitical_risk_score": llm_features["geopolitical_risk_score"],
                 "alert_mode": payload.get("alert_mode"),
                 "quality_gate_pass": payload.get("quality_gate_pass"),
                 "vol_ok": payload.get("vol_ok"),
@@ -920,8 +950,10 @@ class Orchestrator:
             position_data=position_data,
             sentiment_score=sentiment_score,
             calendar_risk_score=calendar_risk_score,
+            llm_features=llm_features,
             session_type=get_session_flag(now),
             day_of_week=now.weekday(),
+            pair=pair,
         )
         prediction = self._predictor.predict(pair, features)
         if prediction is None:

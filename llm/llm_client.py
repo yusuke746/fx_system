@@ -39,9 +39,24 @@ class SentimentResult:
     unexpected_veto: bool   # Veto Layer B フラグ
     summary: str
     news_importance_score: float = 0.0
+    risk_appetite_score: float = 0.0
+    usd_macro_score: float = 0.0
+    jpy_macro_score: float = 0.0
+    oil_shock_score: float = 0.0
+    geopolitical_risk_score: float = 0.0
     model_used: str = ""
     escalated: bool = False
     timestamp_utc: datetime = field(default_factory=now_utc)
+
+    @property
+    def market_features(self) -> dict[str, float]:
+        return {
+            "risk_appetite_score": float(self.risk_appetite_score),
+            "usd_macro_score": float(self.usd_macro_score),
+            "jpy_macro_score": float(self.jpy_macro_score),
+            "oil_shock_score": float(self.oil_shock_score),
+            "geopolitical_risk_score": float(self.geopolitical_risk_score),
+        }
 
 
 class DiffDetector:
@@ -173,6 +188,20 @@ class LLMClient:
             return value.strip().lower() in {"true", "1", "yes", "y"}
         return bool(value)
 
+    def _coerce_score(self, value: object, default: float = 0.0) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            score = default
+        return max(-1.0, min(1.0, score))
+
+    def _coerce_importance(self, value: object, default: float = 0.0) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            score = default
+        return max(0.0, min(1.0, score))
+
     def _is_tool_not_supported_error(self, exc: Exception) -> bool:
         msg = str(exc).lower()
         return (
@@ -242,10 +271,15 @@ class LLMClient:
         parsed = self._parse_llm_json(text)
 
         result = SentimentResult(
-            sentiment_score=float(parsed.get("sentiment_score", 0.0)),
+            sentiment_score=self._coerce_score(parsed.get("sentiment_score", 0.0)),
             unexpected_veto=self._as_bool(parsed.get("unexpected_veto", False)),
             summary=parsed.get("summary", ""),
-            news_importance_score=float(parsed.get("news_importance_score", 0.0)),
+            news_importance_score=self._coerce_importance(parsed.get("news_importance_score", 0.0)),
+            risk_appetite_score=self._coerce_score(parsed.get("risk_appetite_score", 0.0)),
+            usd_macro_score=self._coerce_score(parsed.get("usd_macro_score", 0.0)),
+            jpy_macro_score=self._coerce_score(parsed.get("jpy_macro_score", 0.0)),
+            oil_shock_score=self._coerce_score(parsed.get("oil_shock_score", 0.0)),
+            geopolitical_risk_score=self._coerce_score(parsed.get("geopolitical_risk_score", 0.0)),
             model_used=model,
         )
 
@@ -424,6 +458,11 @@ class LLMClient:
                 "- sentiment_score: float from -1.0 to 1.0\n"
                 "- unexpected_veto: boolean\n"
                 "- news_importance_score: float from 0.0 to 1.0\n"
+                "- risk_appetite_score: float from -1.0 (risk-off) to 1.0 (risk-on)\n"
+                "- usd_macro_score: float from -1.0 (USD bearish) to 1.0 (USD bullish)\n"
+                "- jpy_macro_score: float from -1.0 (JPY bearish) to 1.0 (JPY bullish)\n"
+                "- oil_shock_score: float from -1.0 (oil collapse/disinflation) to 1.0 (oil spike/inflation shock)\n"
+                "- geopolitical_risk_score: float from -1.0 (risk easing) to 1.0 (risk escalation)\n"
                 "- summary: brief summary (max 100 chars)"
             )
 
@@ -435,6 +474,17 @@ class LLMClient:
             "- unexpected_veto: boolean, true if there is a sudden geopolitical or "
             "economic event that should halt trading\n"
             "- news_importance_score: float from 0.0 to 1.0\n"
+            "- risk_appetite_score: float from -1.0 (risk-off) to 1.0 (risk-on). "
+            "Use equity index direction, volatility compression, credit/geopolitical easing, "
+            "carry appetite, and broad safe-haven unwind.\n"
+            "- usd_macro_score: float from -1.0 (USD bearish) to 1.0 (USD bullish). "
+            "Use Fed path, US growth, US yields, tariff/fiscal implications, and USD funding demand.\n"
+            "- jpy_macro_score: float from -1.0 (JPY bearish) to 1.0 (JPY bullish). "
+            "Use safe-haven demand, BoJ policy expectations, Japan yield/cpi signals, and carry unwind pressure.\n"
+            "- oil_shock_score: float from -1.0 (oil collapse/disinflation) to 1.0 (oil spike/inflation shock). "
+            "Use crude, shipping, Middle East supply risk, and energy inflation impulse.\n"
+            "- geopolitical_risk_score: float from -1.0 (risk easing) to 1.0 (risk escalation). "
+            "Use war/ceasefire, sanctions, Strait of Hormuz, shipping lanes, and global conflict spillover.\n"
             "- summary: brief summary of the analysis (max 100 chars)"
         )
 
@@ -474,6 +524,11 @@ class LLMClient:
             "sentiment_score": 0.0,
             "unexpected_veto": True,
             "news_importance_score": 1.0,
+            "risk_appetite_score": 0.0,
+            "usd_macro_score": 0.0,
+            "jpy_macro_score": 0.0,
+            "oil_shock_score": 0.0,
+            "geopolitical_risk_score": 0.0,
             "summary": "Parse error fallback",
         }
 

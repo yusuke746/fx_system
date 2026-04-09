@@ -92,6 +92,11 @@ def _ensure_schema_compat(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "training_samples", "fvg_4h_size_pips", "REAL")
     _ensure_column(conn, "training_samples", "ob_4h_size_pips", "REAL")
     _ensure_column(conn, "training_samples", "sweep_depth_atr_ratio", "REAL")
+    _ensure_column(conn, "training_samples", "risk_appetite_score", "REAL")
+    _ensure_column(conn, "training_samples", "usd_macro_score", "REAL")
+    _ensure_column(conn, "training_samples", "jpy_macro_score", "REAL")
+    _ensure_column(conn, "training_samples", "oil_shock_score", "REAL")
+    _ensure_column(conn, "training_samples", "geopolitical_risk_score", "REAL")
 
 
 def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_type_sql: str) -> None:
@@ -217,6 +222,11 @@ CREATE TABLE IF NOT EXISTS training_samples (
     max_dd_24h               REAL DEFAULT 0,
     calendar_risk_score      INTEGER DEFAULT 0,
     sentiment_score          REAL DEFAULT 0,
+    risk_appetite_score      REAL DEFAULT 0,
+    usd_macro_score          REAL DEFAULT 0,
+    jpy_macro_score          REAL DEFAULT 0,
+    oil_shock_score          REAL DEFAULT 0,
+    geopolitical_risk_score  REAL DEFAULT 0,
     alert_mode               TEXT,
     quality_gate_pass        INTEGER,
     vol_ok                   INTEGER,
@@ -419,6 +429,8 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
            prior_candle_body_ratio, consecutive_same_dir,
               sweep_pending_bars,
               open_positions_count, max_dd_24h, calendar_risk_score, sentiment_score,
+                  risk_appetite_score, usd_macro_score, jpy_macro_score,
+                  oil_shock_score, geopolitical_risk_score,
               alert_mode, quality_gate_pass, vol_ok, in_session, is_friday_late,
               session_type, day_of_week
         ) VALUES (
@@ -435,6 +447,7 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
            ?, ?,
               ?,
               ?, ?, ?, ?,
+              ?, ?, ?, ?, ?,
               ?, ?, ?, ?, ?,
               ?, ?
         )""",
@@ -480,6 +493,11 @@ def insert_training_sample(conn: sqlite3.Connection, sample: dict) -> int:
             sample.get("max_dd_24h", 0.0),
             sample.get("calendar_risk_score", 0),
             sample.get("sentiment_score", 0.0),
+            sample.get("risk_appetite_score", 0.0),
+            sample.get("usd_macro_score", 0.0),
+            sample.get("jpy_macro_score", 0.0),
+            sample.get("oil_shock_score", 0.0),
+            sample.get("geopolitical_risk_score", 0.0),
             sample.get("alert_mode"),
             int(sample.get("quality_gate_pass")) if sample.get("quality_gate_pass") is not None else None,
             int(sample.get("vol_ok")) if sample.get("vol_ok") is not None else None,

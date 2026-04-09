@@ -57,6 +57,29 @@
       "EURUSD": 300,
       "GBPJPY": 240
     },
+    "llm_macro_scaling_per_pair": {
+      "USDJPY": {
+        "risk_appetite_score": 1.0,
+        "usd_macro_score": 1.0,
+        "jpy_macro_score": 1.0,
+        "oil_shock_score": 1.0,
+        "geopolitical_risk_score": 1.0
+      },
+      "EURUSD": {
+        "risk_appetite_score": 1.0,
+        "usd_macro_score": 1.0,
+        "jpy_macro_score": 0.5,
+        "oil_shock_score": 1.0,
+        "geopolitical_risk_score": 1.0
+      },
+      "GBPJPY": {
+        "risk_appetite_score": 1.0,
+        "usd_macro_score": 0.8,
+        "jpy_macro_score": 1.0,
+        "oil_shock_score": 1.0,
+        "geopolitical_risk_score": 1.0
+      }
+    },
     "min_samples_per_pair": 300,
     "min_directional_samples": 30,
     "min_cv_accuracy": 0.40,

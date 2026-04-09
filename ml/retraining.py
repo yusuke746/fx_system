@@ -172,6 +172,11 @@ def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
             float(row.get("max_dd_24h", 0.0)),
             float(row.get("calendar_risk_score", 0)),
             float(row.get("sentiment_score", 0.0)),
+            float(row.get("risk_appetite_score", 0.0)),
+            float(row.get("usd_macro_score", 0.0)),
+            float(row.get("jpy_macro_score", 0.0)),
+            float(row.get("oil_shock_score", 0.0)),
+            float(row.get("geopolitical_risk_score", 0.0)),
             float(row.get("session_type", 0)),
             float(row.get("day_of_week", 0)),
         ])
