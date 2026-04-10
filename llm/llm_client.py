@@ -450,6 +450,93 @@ class LLMClient:
             logger.critical("GPT API authentication error (401/403)")
             raise
 
+    async def propose_weekly_optimization(
+        self,
+        summary: dict,
+        reason: str = "WEEKLY_OPTIMIZATION",
+    ) -> dict:
+        """
+        DB集計サマリーを入力として、週次パラメータ調整案をJSONで返す。
+
+        Returns:
+            {
+              "summary": str,
+              "confidence": float(0..1),
+              "threshold_adjustments": [
+                {
+                  "pair": "USDJPY",
+                  "direction": "long|short",
+                  "direction_threshold": 0.5,
+                  "block_threshold": 0.4,
+                  "min_edge": 0.1,
+                  "reason": "..."
+                }
+              ]
+            }
+        """
+        system_prompt = (
+            "You are a risk-aware FX optimization assistant. "
+            "Use only the provided JSON summary from closed-trade statistics. "
+            "Do not invent data. Return strict JSON only with keys: "
+            "summary (string), confidence (0..1 float), threshold_adjustments (array). "
+            "Each threshold_adjustments item must contain: "
+            "pair (string), direction (long|short), direction_threshold (float), "
+            "block_threshold (float), min_edge (float), reason (string). "
+            "If no safe change is needed, return threshold_adjustments as empty array."
+        )
+        user_prompt = (
+            "Weekly optimization input (JSON):\n"
+            f"{json.dumps(summary, ensure_ascii=True)}\n\n"
+            "Output strict JSON only."
+        )
+
+        response = await self._client.responses.create(
+            model=self._instant_model,
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            reasoning={"effort": self._instant_reasoning_effort},
+        )
+
+        text = ""
+        for item in response.output:
+            if getattr(item, "type", "") != "message":
+                continue
+            content = getattr(item, "content", None)
+            if content is None:
+                continue
+            for block in content:
+                if hasattr(block, "text"):
+                    text += block.text
+
+        parsed = self._parse_llm_json(text)
+
+        if self._db_conn:
+            usage = response.usage
+            tokens_in = usage.input_tokens
+            tokens_out = usage.output_tokens
+            cost = self._estimate_cost(tokens_in, tokens_out, self._instant_model)
+            insert_api_call(
+                self._db_conn,
+                reason=reason,
+                model=self._instant_model,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cost_usd=cost,
+            )
+
+        confidence = self._coerce_importance(parsed.get("confidence", 0.0))
+        adjustments = parsed.get("threshold_adjustments", [])
+        if not isinstance(adjustments, list):
+            adjustments = []
+
+        return {
+            "summary": str(parsed.get("summary", "")),
+            "confidence": confidence,
+            "threshold_adjustments": adjustments,
+        }
+
     def _system_prompt(self, mode: str = "deep") -> str:
         if mode == "quick":
             return (

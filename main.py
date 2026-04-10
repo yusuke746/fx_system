@@ -1419,6 +1419,22 @@ class Orchestrator:
         else:
             logger.info(f"Directional allocation tuning skipped: {directional_result.get('reason', 'N/A')}")
 
+        # LLM提案を使った週次しきい値最適化（ガードレール付き）
+        from optimizer.weekend_optimizer import auto_tune_with_llm
+        llm_opt_result = await auto_tune_with_llm(self._db_conn, self._llm_client)
+        if llm_opt_result.get("applied"):
+            changes = llm_opt_result.get("changed", [])
+            self._config = reload_trading_config()
+            await self._notifier.send(
+                "LLM週次最適化を適用しました\n"
+                f"updated_buckets: {len(changes)}\n"
+                f"confidence: {llm_opt_result.get('llm_confidence', 0.0):.2f}\n"
+                f"summary: {llm_opt_result.get('llm_summary', '')}\n"
+                f"sample: {changes[:3]}"
+            )
+        else:
+            logger.info(f"LLM weekly optimization skipped: {llm_opt_result.get('reason', 'N/A')}")
+
         # 週次メンテ後に最新モデルを再読み込み
         reload_result = self._predictor.load_all_models()
         trained_pairs = [p for p, ok in reload_result.items() if ok]

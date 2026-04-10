@@ -382,3 +382,190 @@ def auto_tune_directional_allocation(
         "sample_count": sample_count,
         "changed": changes,
     }
+
+
+async def auto_tune_with_llm(
+    db_conn: sqlite3.Connection,
+    llm_client,
+    lookback_days: int = 14,
+    min_samples: int = 30,
+    min_samples_per_direction: int = 8,
+) -> dict:
+    """DB実績を要約してLLMへ提案生成を依頼し、ガードレール付きで適用する。"""
+    config = get_trading_config()
+    llm_cfg = config.get("llm", {})
+    if not llm_cfg.get("llm_enabled", True):
+        return {"applied": False, "reason": "llm_disabled"}
+
+    opt_cfg = config.get("optimization", {})
+    max_change_ratio = float(opt_cfg.get("max_change_ratio", 0.20))
+
+    trades = get_recent_trades(db_conn, days=lookback_days)
+    closed = [t for t in trades if t.get("close_time") and str(t.get("direction") or "") in {"long", "short"}]
+    sample_count = len(closed)
+    if sample_count < min_samples:
+        reason = f"insufficient_samples({sample_count}<{min_samples})"
+        logger.info(f"LLM optimization skipped: {reason}")
+        return {"applied": False, "reason": reason, "sample_count": sample_count}
+
+    buckets: dict[tuple[str, str], dict[str, float]] = {}
+    for row in closed:
+        pair = str(row.get("pair") or "")
+        direction = str(row.get("direction") or "")
+        key = (pair, direction)
+        pips = float(row.get("pnl_pips") or 0.0)
+        b = buckets.setdefault(key, {"count": 0.0, "wins": 0.0, "pips_sum": 0.0})
+        b["count"] += 1
+        b["pips_sum"] += pips
+        if pips > 0:
+            b["wins"] += 1
+
+    pairs = list(config.get("system", {}).get("pairs", []))
+    ml_cfg = config.setdefault("ml", {})
+    thresholds = ml_cfg.setdefault("prediction_thresholds", {})
+
+    pair_direction_metrics: list[dict] = []
+    for pair in pairs:
+        for direction in ("long", "short"):
+            s = buckets.get((pair, direction), {"count": 0.0, "wins": 0.0, "pips_sum": 0.0})
+            count = int(s["count"])
+            avg_pips = float(s["pips_sum"] / s["count"]) if s["count"] > 0 else 0.0
+            winrate = float(s["wins"] / s["count"]) if s["count"] > 0 else 0.0
+            current = thresholds.setdefault(pair, {}).setdefault(direction, {})
+            pair_direction_metrics.append({
+                "pair": pair,
+                "direction": direction,
+                "count": count,
+                "winrate": round(winrate, 4),
+                "avg_pips": round(avg_pips, 4),
+                "current_thresholds": {
+                    "direction_threshold": float(current.get("direction_threshold", 0.45)),
+                    "block_threshold": float(current.get("block_threshold", 0.45)),
+                    "min_edge": float(current.get("min_edge", 0.08)),
+                },
+            })
+
+    summary = {
+        "lookback_days": lookback_days,
+        "sample_count": sample_count,
+        "min_samples_per_direction": min_samples_per_direction,
+        "max_change_ratio": max_change_ratio,
+        "pair_direction_metrics": pair_direction_metrics,
+        "policy": {
+            "only_adjust_prediction_thresholds": True,
+            "safe_ranges": {
+                "direction_threshold": [0.35, 0.75],
+                "block_threshold": [0.20, 0.70],
+                "min_edge": [0.04, 0.20],
+            },
+        },
+    }
+
+    try:
+        proposal = await llm_client.propose_weekly_optimization(summary=summary, reason="WEEKLY_OPTIMIZATION")
+    except Exception as e:
+        logger.warning(f"LLM optimization proposal failed: {e}")
+        return {"applied": False, "reason": f"llm_error:{e}", "sample_count": sample_count}
+
+    adjustments = proposal.get("threshold_adjustments", [])
+    if not adjustments:
+        return {
+            "applied": False,
+            "reason": "no_change_needed",
+            "sample_count": sample_count,
+            "llm_summary": proposal.get("summary", ""),
+            "llm_confidence": float(proposal.get("confidence", 0.0)),
+        }
+
+    def _bounded_by_ratio(old_v: float, new_v: float) -> bool:
+        base = max(abs(old_v), 1e-6)
+        return abs(new_v - old_v) <= base * max_change_ratio + 1e-12
+
+    applied_changes: list[dict] = []
+    ignored_changes: list[dict] = []
+
+    for item in adjustments:
+        pair = str(item.get("pair") or "")
+        direction = str(item.get("direction") or "")
+        if pair not in pairs or direction not in {"long", "short"}:
+            ignored_changes.append({"item": item, "reason": "unknown_pair_or_direction"})
+            continue
+
+        bucket = next(
+            (m for m in pair_direction_metrics if m["pair"] == pair and m["direction"] == direction),
+            None,
+        )
+        if bucket is None or int(bucket.get("count", 0)) < min_samples_per_direction:
+            ignored_changes.append({"item": item, "reason": "insufficient_bucket_samples"})
+            continue
+
+        pair_cfg = thresholds.setdefault(pair, {})
+        dir_cfg = pair_cfg.setdefault(direction, {})
+
+        old_dt = float(dir_cfg.get("direction_threshold", 0.45))
+        old_bt = float(dir_cfg.get("block_threshold", 0.45))
+        old_me = float(dir_cfg.get("min_edge", 0.08))
+
+        try:
+            new_dt_raw = float(item.get("direction_threshold", old_dt))
+            new_bt_raw = float(item.get("block_threshold", old_bt))
+            new_me_raw = float(item.get("min_edge", old_me))
+        except (TypeError, ValueError):
+            ignored_changes.append({"item": item, "reason": "invalid_numeric_value"})
+            continue
+
+        if not (
+            _bounded_by_ratio(old_dt, new_dt_raw)
+            and _bounded_by_ratio(old_bt, new_bt_raw)
+            and _bounded_by_ratio(old_me, new_me_raw)
+        ):
+            ignored_changes.append({"item": item, "reason": "exceeds_max_change_ratio"})
+            continue
+
+        new_dt = round(_clamp(new_dt_raw, 0.35, 0.75), 3)
+        new_bt = round(_clamp(new_bt_raw, 0.20, 0.70), 3)
+        new_me = round(_clamp(new_me_raw, 0.04, 0.20), 3)
+
+        if new_dt == old_dt and new_bt == old_bt and new_me == old_me:
+            continue
+
+        dir_cfg["direction_threshold"] = new_dt
+        dir_cfg["block_threshold"] = new_bt
+        dir_cfg["min_edge"] = new_me
+        applied_changes.append({
+            "pair": pair,
+            "direction": direction,
+            "old": {
+                "direction_threshold": old_dt,
+                "block_threshold": old_bt,
+                "min_edge": old_me,
+            },
+            "new": {
+                "direction_threshold": new_dt,
+                "block_threshold": new_bt,
+                "min_edge": new_me,
+            },
+            "reason": str(item.get("reason") or ""),
+        })
+
+    if not applied_changes:
+        return {
+            "applied": False,
+            "reason": "no_guardrail_passed",
+            "sample_count": sample_count,
+            "ignored": ignored_changes,
+            "llm_summary": proposal.get("summary", ""),
+            "llm_confidence": float(proposal.get("confidence", 0.0)),
+        }
+
+    save_trading_config(config)
+    logger.info(f"LLM optimization applied: {len(applied_changes)} threshold buckets updated")
+
+    return {
+        "applied": True,
+        "sample_count": sample_count,
+        "changed": applied_changes,
+        "ignored": ignored_changes,
+        "llm_summary": proposal.get("summary", ""),
+        "llm_confidence": float(proposal.get("confidence", 0.0)),
+    }
