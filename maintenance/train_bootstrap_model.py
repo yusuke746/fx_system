@@ -3,7 +3,7 @@
 
 入力CSVの想定:
   - maintenance/build_bootstrap_dataset.py の出力
-    - 38特徴量（ml.lgbm_model.FEATURE_NAMES と同名）
+        - 43特徴量（ml.lgbm_model.FEATURE_NAMES と同名）
   - label 列（0=up, 1=flat, 2=down）
 
 使い方:

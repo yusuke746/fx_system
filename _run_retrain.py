@@ -6,6 +6,7 @@ from pathlib import Path
 from loguru import logger
 from core.database import init_db
 from ml.retraining import run_weekly_retraining
+from config.settings import get_settings
 
 # ログ設定
 logger.add(
@@ -18,7 +19,9 @@ print("=" * 70)
 print("FX自動売買システム - LightGBM 再学習スクリプト（43特徴量版）")
 print("=" * 70)
 
-db_path = Path("data/trades.db")
+settings = get_settings()
+db_path = Path(settings.db_path)
+model_dir = Path(settings.model_dir)
 
 # DB初期化
 print("\n[1/3] DB初期化...")
@@ -28,6 +31,7 @@ print("  ✓ DB初期化完了")
 # データ確認
 print("\n[2/3] training_samplesデータ確認...")
 with sqlite3.connect(str(db_path)) as conn:
+    conn.row_factory = sqlite3.Row
     cur = conn.execute(
         "SELECT COUNT(*) as total, "
         "SUM(CASE WHEN label IS NOT NULL THEN 1 ELSE 0 END) as labeled "
@@ -55,7 +59,7 @@ with sqlite3.connect(str(db_path)) as conn:
         for pair in ["USDJPY", "EURUSD", "GBPJPY"]:
             if pair in result['retrain'].get('trained_pairs', []):
                 val = result['retrain'].get('validation', {}).get(pair, {})
-                acc = val.get('balanced_acc', 'N/A')
+                acc = val.get('balanced_accuracy', val.get('accuracy', 'N/A'))
                 print(f"    {pair}: ✓ (balanced_acc={acc})")
             else:
                 skip_reason = result['retrain'].get('skipped_pairs', {}).get(pair)
@@ -64,6 +68,7 @@ with sqlite3.connect(str(db_path)) as conn:
 # モデルファイル確認
 print("\n✓ モデルファイル確認...")
 models_dir = Path("models")
+models_dir = model_dir
 models_dir.mkdir(parents=True, exist_ok=True)
 
 for pair in ["USDJPY", "EURUSD", "GBPJPY"]:

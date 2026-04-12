@@ -3,10 +3,10 @@ TradingView CSV から初期学習用データセットを生成する。
 
 想定入力:
   - Pine の CSVエクスポートモードで出力したチャートCSV
-    - CSV_* 列に 38特徴量が含まれる
+        - CSV_* 列に 38特徴量が含まれる
 
 出力:
-    - 学習用CSV（38特徴量 + label + 補助列）
+        - 学習用CSV（43特徴量 + label + 補助列）
 
 使い方:
   python maintenance/build_bootstrap_dataset.py \
@@ -25,6 +25,7 @@ from pathlib import Path
 import pandas as pd
 
 from core.time_manager import get_session_flag
+from ml.lgbm_model import FEATURE_NAMES
 
 
 FEATURE_COLS = [
@@ -311,6 +312,23 @@ def build_dataset(input_path: Path, output_path: Path, pair: str, horizon_bars: 
 
     model_df = signal_df[["pair", "signal_time", "direction", "CSV_close_price", *FEATURE_COLS, "future_close_price", "future_return_pips", "session_type", "day_of_week", "label"]].copy()
     model_df = model_df.rename(columns=RENAME_TO_MODEL | {"CSV_close_price": "close_price"})
+
+    # Pine CSV には LLM市場環境(5) が存在しないため、ブートストラップ時は 0 で埋める。
+    for feat in FEATURE_NAMES:
+        if feat not in model_df.columns:
+            model_df[feat] = 0.0
+
+    ordered_cols = [
+        "pair",
+        "signal_time",
+        "direction",
+        "close_price",
+        *FEATURE_NAMES,
+        "future_close_price",
+        "future_return_pips",
+        "label",
+    ]
+    model_df = model_df[ordered_cols]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     model_df.to_csv(output_path, index=False)

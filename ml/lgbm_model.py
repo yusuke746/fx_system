@@ -91,6 +91,20 @@ FEATURE_NAMES = [
     "day_of_week",
 ]
 
+# 旧モデル互換（38特徴量）
+# v2.3 で追加した LLM市場環境(5) を除いた構成。
+LEGACY_FEATURE_NAMES_38 = [
+    name
+    for name in FEATURE_NAMES
+    if name not in {
+        "risk_appetite_score",
+        "usd_macro_score",
+        "jpy_macro_score",
+        "oil_shock_score",
+        "geopolitical_risk_score",
+    }
+]
+
 assert len(FEATURE_NAMES) == 43, f"Expected 43 features, got {len(FEATURE_NAMES)}"
 
 # LightGBM 学習パラメータ（デフォルト値）
@@ -315,6 +329,7 @@ class LGBMPredictor:
         self._model_dir = Path(model_dir)
         self._models: dict[str, object] = {}  # pair -> model
         self._model_accuracies: dict[str, float] = {}  # pair -> WFV accuracy
+        self._feature_indices: dict[str, list[int]] = {}  # pair -> feature index map
 
     def set_model_accuracy(self, pair: str, accuracy: float) -> None:
         """WFV精度をペアごとに設定する。"""
@@ -336,14 +351,45 @@ class LGBMPredictor:
 
             expected_features = len(FEATURE_NAMES)
             model_features = getattr(model, "n_features_in_", None)
+            feature_indices = list(range(expected_features))
+
             if model_features is not None and int(model_features) != expected_features:
-                logger.error(
-                    f"Model feature mismatch for {pair}: model={model_features}, expected={expected_features}. "
-                    f"Please retrain or regenerate model file: {model_path}"
-                )
-                return False
+                model_features = int(model_features)
+
+                # 1) モデル内 feature 名があれば、名前ベースで安全に再マッピング
+                model_feature_names = getattr(model, "feature_name_", None)
+                if isinstance(model_feature_names, list) and len(model_feature_names) == model_features:
+                    if all(name in FEATURE_NAMES for name in model_feature_names):
+                        feature_indices = [FEATURE_NAMES.index(name) for name in model_feature_names]
+                        logger.warning(
+                            f"Model feature mismatch tolerated for {pair}: "
+                            f"model={model_features}, expected={expected_features}. "
+                            f"Using name-based feature alignment."
+                        )
+                    else:
+                        unknown = [n for n in model_feature_names if n not in FEATURE_NAMES]
+                        logger.error(
+                            f"Model feature mismatch for {pair}: unknown features in model={unknown[:5]}. "
+                            f"Please retrain or regenerate model file: {model_path}"
+                        )
+                        return False
+                # 2) v2.3以前の38特徴量モデルは既知の順序で後方互換
+                elif model_features == len(LEGACY_FEATURE_NAMES_38):
+                    feature_indices = [FEATURE_NAMES.index(name) for name in LEGACY_FEATURE_NAMES_38]
+                    logger.warning(
+                        f"Legacy feature model loaded for {pair}: "
+                        f"model={model_features}, expected={expected_features}. "
+                        f"Running in compatibility mode (without 5 LLM macro features)."
+                    )
+                else:
+                    logger.error(
+                        f"Model feature mismatch for {pair}: model={model_features}, expected={expected_features}. "
+                        f"Please retrain or regenerate model file: {model_path}"
+                    )
+                    return False
 
             self._models[pair] = model
+            self._feature_indices[pair] = feature_indices
             logger.info(f"Model loaded for {pair}: {model_path}")
             return True
         except Exception as e:
@@ -374,7 +420,25 @@ class LGBMPredictor:
             return None
 
         try:
-            proba = model.predict_proba(features)[0]  # [prob_up, prob_flat, prob_down]
+            input_features = features
+            feature_indices = self._feature_indices.get(pair)
+            if feature_indices:
+                required = len(feature_indices)
+                if features.ndim != 2:
+                    logger.error(
+                        f"LightGBM prediction error for {pair}: invalid feature ndim={features.ndim}, expected=2"
+                    )
+                    return None
+                if features.shape[1] < required:
+                    logger.error(
+                        f"LightGBM prediction error for {pair}: insufficient feature width "
+                        f"got={features.shape[1]}, required={required}"
+                    )
+                    return None
+                if features.shape[1] != required:
+                    input_features = features[:, feature_indices]
+
+            proba = model.predict_proba(input_features)[0]  # [prob_up, prob_flat, prob_down]
             result = PredictionResult(
                 prob_up=float(proba[0]),
                 prob_flat=float(proba[1]),

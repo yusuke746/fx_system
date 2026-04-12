@@ -135,50 +135,68 @@ def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
         if row.get("label") is None:
             continue
 
+        def _f(name: str, default: float) -> float:
+            v = row.get(name, default)
+            if v is None:
+                return float(default)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return float(default)
+
+        def _i(name: str, default: int) -> float:
+            v = row.get(name, default)
+            if v is None:
+                return float(default)
+            try:
+                return float(int(v))
+            except (TypeError, ValueError):
+                return float(default)
+
         X.append([
-            float(row.get("fvg_4h_zone_active", 0)),
-            float(row.get("ob_4h_zone_active", 0)),
-            float(row.get("liq_sweep_1h", 0)),
-            float(row.get("liq_sweep_qualified", 0)),
-            float(row.get("bos_1h", 0)),
-            float(row.get("choch_1h", 0)),
-            float(row.get("msb_15m_confirmed", 0)),
-            float(row.get("mtf_confluence", 0)),
-            float(row.get("atr_ratio", 1.0)),
-            float(row.get("bb_width", 0.0)),
-            float(row.get("close_vs_ema20_4h", 0.0)),
-            float(row.get("close_vs_ema50_4h", 0.0)),
-            float(row.get("high_low_range_15m", 0.0)),
-            float(row.get("trend_direction", 0)),
-            float(row.get("momentum_long", 0)),
-            float(row.get("momentum_short", 0)),
-            float(row.get("macd_histogram", 0.0)),
-            float(row.get("macd_signal_cross", 0)),
-            float(row.get("rsi_14", 50.0)),
-            float(row.get("rsi_zone", 0)),
-            float(row.get("stoch_k", 50.0)),
-            float(row.get("stoch_d", 50.0)),
-            float(row.get("momentum_3bar", 0.0)),
-            float(row.get("ob_4h_distance_pips", 0.0)),
-            float(row.get("fvg_4h_fill_ratio", 0.0)),
-            float(row.get("liq_sweep_strength", 0.0)),
-            float(row.get("fvg_4h_size_pips", 0.0)),
-            float(row.get("ob_4h_size_pips", 0.0)),
-            float(row.get("sweep_depth_atr_ratio", 0.0)),
-            float(row.get("prior_candle_body_ratio", 0.5)),
-            float(row.get("consecutive_same_dir", 0)),
-            float(row.get("sweep_pending_bars", 0)),
-            float(row.get("open_positions_count", 0)),
-            float(row.get("max_dd_24h", 0.0)),
-            float(row.get("calendar_risk_score", 0)),
-            float(row.get("sentiment_score", 0.0)),
-            float(row.get("risk_appetite_score", 0.0)),
-            float(row.get("usd_macro_score", 0.0)),
-            float(row.get("jpy_macro_score", 0.0)),
-            float(row.get("oil_shock_score", 0.0)),
-            float(row.get("geopolitical_risk_score", 0.0)),
-            float(row.get("session_type", 0)),
-            float(row.get("day_of_week", 0)),
+            _i("fvg_4h_zone_active", 0),
+            _i("ob_4h_zone_active", 0),
+            _i("liq_sweep_1h", 0),
+            _i("liq_sweep_qualified", 0),
+            _i("bos_1h", 0),
+            _i("choch_1h", 0),
+            _i("msb_15m_confirmed", 0),
+            _f("mtf_confluence", 0),
+            _f("atr_ratio", 1.0),
+            _f("bb_width", 0.0),
+            _f("close_vs_ema20_4h", 0.0),
+            _f("close_vs_ema50_4h", 0.0),
+            _f("high_low_range_15m", 0.0),
+            _f("trend_direction", 0),
+            _f("momentum_long", 0),
+            _f("momentum_short", 0),
+            _f("macd_histogram", 0.0),
+            _i("macd_signal_cross", 0),
+            _f("rsi_14", 50.0),
+            _i("rsi_zone", 0),
+            _f("stoch_k", 50.0),
+            _f("stoch_d", 50.0),
+            _f("momentum_3bar", 0.0),
+            _f("ob_4h_distance_pips", 0.0),
+            _f("fvg_4h_fill_ratio", 0.0),
+            _f("liq_sweep_strength", 0.0),
+            _f("fvg_4h_size_pips", 0.0),
+            _f("ob_4h_size_pips", 0.0),
+            _f("sweep_depth_atr_ratio", 0.0),
+            _f("prior_candle_body_ratio", 0.5),
+            _i("consecutive_same_dir", 0),
+            _i("sweep_pending_bars", 0),
+            _i("open_positions_count", 0),
+            _f("max_dd_24h", 0.0),
+            _i("calendar_risk_score", 0),
+            _f("sentiment_score", 0.0),
+            _f("risk_appetite_score", 0.0),
+            _f("usd_macro_score", 0.0),
+            _f("jpy_macro_score", 0.0),
+            _f("oil_shock_score", 0.0),
+            _f("geopolitical_risk_score", 0.0),
+            _i("session_type", 0),
+            _i("day_of_week", 0),
         ])
         y.append(int(row["label"]))
 
