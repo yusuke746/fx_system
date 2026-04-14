@@ -12,6 +12,10 @@ logs/
 # === モデルファイル ===
 models/*.pkl
 models/*.txt
+models/lgbm_*_metrics.json
+
+# === 生成データファイル ===
+data/*_bootstrap_train.csv
 
 # === Python ===
 __pycache__/
