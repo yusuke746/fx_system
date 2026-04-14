@@ -2,8 +2,9 @@
 TradingView CSV から 3ペア一括で初期モデルを作成するバッチ。
 
 処理フロー:
-  1) build_bootstrap_dataset.py 相当の学習CSV生成
-  2) train_bootstrap_model.py 相当の LightGBM 学習
+    1) (任意) backfill_macro_features.py で LLMマクロ特徴量をバックフィル
+    2) build_bootstrap_dataset.py 相当の学習CSV生成
+    3) train_bootstrap_model.py 相当の LightGBM 学習
 
 想定入力ファイル名（既定）:
   data/{PAIR}_chart.csv
@@ -28,6 +29,7 @@ if str(_REPO_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 
+from maintenance.backfill_macro_features import run_backfill_for_pair
 from maintenance.build_bootstrap_dataset import build_dataset
 from ml.lgbm_model import FEATURE_NAMES
 from ml.trainer import train_model, walk_forward_validate, save_model_metrics
@@ -85,6 +87,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--horizon-bars", type=int, default=16, help="Future horizon in 15m bars")
     parser.add_argument("--model-dir", default="models", help="Model output directory")
     parser.add_argument("--min-samples", type=int, default=300, help="Minimum samples required per pair")
+    parser.add_argument("--enable-macro-backfill", action="store_true", help="Backfill LLM macro features before training")
+    parser.add_argument("--news-json", default="", help="News history json/jsonl path for macro backfill")
+    parser.add_argument("--backfill-output-pattern", default="{pair}_chart_backfilled.csv", help="Backfill output filename pattern")
+    parser.add_argument("--backfill-lookback-days", type=int, default=180, help="Backfill lookback days")
+    parser.add_argument("--backfill-news-lookback-hours", type=int, default=24, help="Backfill news lookback hours")
+    parser.add_argument("--backfill-max-news", type=int, default=10, help="Backfill max news per inference")
+    parser.add_argument("--backfill-cache-ttl-minutes", type=int, default=60, help="Backfill forced refresh TTL minutes")
+    parser.add_argument("--backfill-atr-threshold", type=float, default=1.5, help="Backfill ATR spike threshold")
+    parser.add_argument(
+        "--backfill-ignore-news-diff-trigger",
+        action="store_true",
+        help="Disable news hash diff trigger during backfill (TTL/ATR only)",
+    )
+    parser.add_argument(
+        "--backfill-ignore-atr-spike-trigger",
+        action="store_true",
+        help="Disable ATR spike trigger during backfill (TTL/news-diff only)",
+    )
     parser.add_argument("--skip-wfv", action="store_true", help="Skip walk-forward validation")
     return parser.parse_args()
 
@@ -96,20 +116,47 @@ def main() -> None:
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
+    if args.enable_macro_backfill and not args.news_json:
+        raise ValueError("--enable-macro-backfill requires --news-json")
+
+    news_path = Path(args.news_json) if args.news_json else None
+    if args.enable_macro_backfill and news_path and not news_path.exists():
+        raise FileNotFoundError(f"news json not found: {news_path}")
+
     summary: list[dict] = []
 
     for pair in pairs:
         input_path = input_dir / args.input_pattern.format(pair=pair)
         output_path = output_dir / args.output_pattern.format(pair=pair)
+        dataset_input_path = input_path
 
         if not input_path.exists():
             summary.append({"pair": pair, "status": "skip", "reason": f"missing_input:{input_path}"})
             continue
 
         try:
+            backfill_rows = None
+            if args.enable_macro_backfill:
+                backfill_output_path = output_dir / args.backfill_output_pattern.format(pair=pair)
+                backfilled = run_backfill_for_pair(
+                    pair=pair,
+                    chart_csv=input_path,
+                    news_json=news_path,
+                    output=backfill_output_path,
+                    lookback_days=args.backfill_lookback_days,
+                    news_lookback_hours=args.backfill_news_lookback_hours,
+                    max_news=args.backfill_max_news,
+                    cache_ttl_minutes=args.backfill_cache_ttl_minutes,
+                    atr_threshold=args.backfill_atr_threshold,
+                    ignore_news_diff_trigger=args.backfill_ignore_news_diff_trigger,
+                    ignore_atr_spike_trigger=args.backfill_ignore_atr_spike_trigger,
+                )
+                dataset_input_path = backfill_output_path
+                backfill_rows = int(len(backfilled))
+
             horizon = _horizon_bars_for_pair(pair, args.horizon_bars)
             built = build_dataset(
-                input_path=input_path,
+                input_path=dataset_input_path,
                 output_path=output_path,
                 pair=pair,
                 horizon_bars=horizon,
@@ -149,6 +196,8 @@ def main() -> None:
             summary.append({
                 "pair": pair,
                 "status": "trained",
+                "source_csv": str(dataset_input_path),
+                "backfill_rows": backfill_rows,
                 "dataset_rows": int(len(built)),
                 "train_rows": int(len(X)),
                 "dropped_nan_rows": int(dropped),

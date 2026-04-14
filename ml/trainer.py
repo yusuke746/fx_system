@@ -72,6 +72,7 @@ def train_model(
     y: np.ndarray,
     pair: str,
     model_dir: str = "models",
+    sample_weight: np.ndarray | None = None,
 ) -> lgb.LGBMClassifier:
     """
     ウォークフォワード検証付きで LightGBM モデルを学習する。
@@ -97,6 +98,7 @@ def train_model(
     model.fit(
         X, y,
         feature_name=FEATURE_NAMES,
+        sample_weight=sample_weight,
     )
 
     # モデル保存（世代管理）
@@ -124,6 +126,7 @@ def train_model(
 def walk_forward_validate(
     X: np.ndarray,
     y: np.ndarray,
+    sample_weight: np.ndarray | None = None,
     signal_times: list[datetime] | None = None,
     train_days: int = 60,
     val_days: int = 15,
@@ -147,6 +150,12 @@ def walk_forward_validate(
 
     if signal_times is not None:
         times = np.array(signal_times)
+        order = np.argsort(times)
+        times = times[order]
+        X = X[order]
+        y = y[order]
+        if sample_weight is not None:
+            sample_weight = sample_weight[order]
         fold_results = []
         fold = 0
         t_start = times[0]
@@ -164,8 +173,10 @@ def walk_forward_validate(
 
             X_train, y_train = X[train_mask], y[train_mask]
             X_val, y_val = X[val_mask], y[val_mask]
+            w_train = sample_weight[train_mask] if sample_weight is not None else None
 
-            if len(X_train) < train_days:  # train_days 分のサンプルに満たない場合はスキップ
+            _min_leaf = int(lgbm_params.get("min_child_samples", 20))
+            if len(X_train) < _min_leaf:  # LightGBM の min_child_samples に満たない場合はスキップ
                 fold += 1
                 continue
 
@@ -175,7 +186,7 @@ def walk_forward_validate(
 
             class_weight = _build_class_weight(y_train, directional_boost)
             model = lgb.LGBMClassifier(**lgbm_params, class_weight=class_weight)
-            model.fit(X_train, y_train, feature_name=FEATURE_NAMES)
+            model.fit(X_train, y_train, feature_name=FEATURE_NAMES, sample_weight=w_train)
             y_pred = model.predict(X_val)
             accuracy = float(np.mean(y_pred == y_val))
             balanced_accuracy = float(balanced_accuracy_score(y_val, y_pred))
@@ -192,14 +203,30 @@ def walk_forward_validate(
             })
             fold += 1
 
-        if len(fold_results) < 2:
+        if len(fold_results) == 0:
             logger.warning(
-                "walk_forward_validate: fewer than 2 folds available, returning empty results."
+                "walk_forward_validate: no fold available, returning empty results."
             )
             return {
                 "accuracy": 0.0,
+                "balanced_accuracy": 0.0,
+                "majority_baseline": 0.0,
                 "fold_results": [],
                 "n_folds": 0,
+                "date_based": True,
+                "total_samples": total_samples,
+            }
+        if len(fold_results) == 1:
+            only = fold_results[0]
+            logger.warning(
+                "walk_forward_validate: only 1 fold available, using single-fold metrics."
+            )
+            return {
+                "accuracy": float(only["accuracy"]),
+                "balanced_accuracy": float(only["balanced_accuracy"]),
+                "majority_baseline": float(only["majority_baseline"]),
+                "fold_results": fold_results,
+                "n_folds": 1,
                 "date_based": True,
                 "total_samples": total_samples,
             }
@@ -237,10 +264,11 @@ def walk_forward_validate(
 
         X_train, y_train = X[start:train_end], y[start:train_end]
         X_val, y_val = X[train_end:val_end], y[train_end:val_end]
+        w_train = sample_weight[start:train_end] if sample_weight is not None else None
 
         class_weight = _build_class_weight(y_train, directional_boost)
         model = lgb.LGBMClassifier(**lgbm_params, class_weight=class_weight)
-        model.fit(X_train, y_train, feature_name=FEATURE_NAMES)
+        model.fit(X_train, y_train, feature_name=FEATURE_NAMES, sample_weight=w_train)
 
         y_pred = model.predict(X_val)
         accuracy = float(np.mean(y_pred == y_val))

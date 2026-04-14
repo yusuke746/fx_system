@@ -190,6 +190,30 @@ WFV 検証をスキップして高速に学習したい場合:
 python -m maintenance.run_bootstrap_batch --input-dir data --model-dir models --skip-wfv
 ```
 
+半年分のマクロ環境をニュースJSONからバックフィルしてから学習する場合:
+
+```bat
+python -m maintenance.run_bootstrap_batch --input-dir data --model-dir models --enable-macro-backfill --news-json data/calendar/news_history.jsonl
+```
+
+バックフィル単体実行（1ペア）:
+
+```bat
+python -m maintenance.backfill_macro_features --pair USDJPY --chart-csv data/USDJPY_chart.csv --news-json data/calendar/news_history.jsonl --output data/USDJPY_chart_backfilled.csv
+```
+
+ニュース履歴ファイルが無い場合（APIキー不要、GDELT）:
+
+```bat
+python -m maintenance.fetch_news_history_gdelt --days 180 --output data/calendar/news_history.jsonl
+```
+
+NewsAPI を使う場合（.env の NEWSAPI_KEY を使用）:
+
+```bat
+python -m maintenance.fetch_news_history_newsapi --days 180 --output data/calendar/news_history.jsonl
+```
+
 #### 方式 B（疎通テスト最速）: ダミーモデル生成
 
 ```bat

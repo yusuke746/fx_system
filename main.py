@@ -667,7 +667,7 @@ class Orchestrator:
                 "open_positions_count": len(self._position_manager.positions),
             }
             detector = self._diff_detectors.setdefault(pair, DiffDetector())
-            cached = detector.cached_result
+            cached = detector.get_effective_cached_result()
             sentiment_score, calendar_risk_score, llm_features = self._resolve_llm_feature_context(cached)
 
             features = build_features(
@@ -825,7 +825,7 @@ class Orchestrator:
 
         # ③ GPT-5.2 キャッシュ読込（Veto Layer B）
         detector = self._diff_detectors.setdefault(pair, DiffDetector())
-        cached = detector.cached_result
+        cached = detector.get_effective_cached_result()
         sentiment_score, calendar_risk_score, llm_features = self._resolve_llm_feature_context(cached)
         if cached and cached.unexpected_veto:
             logger.info("Signal vetoed by GPT unexpected_veto flag")
@@ -1291,13 +1291,21 @@ class Orchestrator:
                 veto_active, _ = self._calendar_veto.is_veto_active(pair)
                 detector = self._diff_detectors.setdefault(pair, DiffDetector())
                 news_articles = self._build_pair_news_articles(pair)
-                market_context = (
-                    f"pair={pair}, high_impact_events_nearby={len(news_articles)}, "
-                    f"mode={'low_power' if detector.is_low_power else 'normal'}"
-                )
 
                 # ← [NEW] webhook キャッシュから ATR情報を取得
                 current_atr, avg_atr_20d = self._last_webhook_atrs.get(pair, (0.0, 0.0))
+                atr_mult = float(config.get("llm", {}).get("atr_threshold_multiplier", 1.5))
+                atr_spike_active = avg_atr_20d > 0 and current_atr > avg_atr_20d * atr_mult
+                atr_context = (
+                    f"ATR spiked {atr_mult:.2f}x over 20d average in last 15 mins "
+                    f"(atr={current_atr:.6f}, avg20d={avg_atr_20d:.6f})"
+                    if atr_spike_active
+                    else "No ATR 1.5x spike in last 15 mins"
+                )
+                market_context = (
+                    f"pair={pair}, high_impact_events_nearby={len(news_articles)}, "
+                    f"mode={'low_power' if detector.is_low_power else 'normal'}, {atr_context}"
+                )
 
                 should_call, reason = detector.run_diff_check(
                     news_articles=news_articles,
@@ -1314,8 +1322,7 @@ class Orchestrator:
                             market_context=market_context,
                             reason=reason,
                         )
-                        detector._cached_result = result
-                        detector._last_call_time = now_utc()
+                        detector.update_cached_result(result)
                     except Exception as e:
                         # モデル未提供/アクセス不可時は設定を変えず、通知のみ（スロットリング）
                         msg = str(e)

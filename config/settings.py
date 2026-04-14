@@ -50,7 +50,11 @@ class Settings(BaseSettings):
     webhook_allowed_ips: str = ""
     webhook_trusted_proxies: str = ""
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
     @property
     def webhook_allowed_networks(self) -> list[ipaddress._BaseNetwork]:
@@ -110,6 +114,11 @@ def _normalize_trading_config(config: dict) -> dict:
     llm.setdefault("web_search_enabled", True)
     llm.setdefault("web_search_tool_type", "web_search_preview")
     llm.setdefault("web_search_context_size", "low")
+    llm.setdefault("state_ema_alpha", 0.35)
+    llm.setdefault("state_decay_enabled", True)
+    llm.setdefault("state_decay_half_life_minutes", 240)
+    llm.setdefault("state_decay_max_minutes", 1440)
+    llm.setdefault("state_veto_persist_minutes", 180)
 
     ml = config.setdefault("ml", {})
     ml.setdefault("label_horizon_minutes", 240)
@@ -117,7 +126,14 @@ def _normalize_trading_config(config: dict) -> dict:
     ml.setdefault("min_samples_per_pair", 300)
     ml.setdefault("min_directional_samples", 30)
     ml.setdefault("min_cv_accuracy", 0.40)
+    ml.setdefault("allow_train_without_wfv", True)
+    ml.setdefault("lookback_days", 90)
     ml.setdefault("directional_class_boost", 1.0)
+    ml.setdefault("recency_weighting_enabled", True)
+    ml.setdefault("recency_half_life_days", 21)
+    ml.setdefault("recency_min_weight", 0.35)
+    ml.setdefault("wfv_train_days", 21)
+    ml.setdefault("wfv_val_days", 7)
     ml.setdefault("lgbm_params_per_pair", {})
     ml.setdefault("execution_direction_mode", "signal")
     ml.setdefault("prediction_thresholds", {})

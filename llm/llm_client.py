@@ -19,9 +19,10 @@ GPT-5.2 差分検知モジュール（Veto Layer B を含む）
 import asyncio
 import hashlib
 import json
+import math
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 import openai
@@ -42,6 +43,8 @@ class SentimentResult:
     risk_appetite_score: float = 0.0
     usd_macro_score: float = 0.0
     jpy_macro_score: float = 0.0
+    eur_strength_score: float = 0.0
+    gbp_strength_score: float = 0.0
     oil_shock_score: float = 0.0
     geopolitical_risk_score: float = 0.0
     model_used: str = ""
@@ -68,6 +71,74 @@ class DiffDetector:
         self._low_power_mode: bool = False
         self._cached_result: SentimentResult | None = None
         self._last_call_time: datetime | None = None
+
+    @staticmethod
+    def _blend(prev: float, cur: float, alpha: float) -> float:
+        return (alpha * cur) + ((1.0 - alpha) * prev)
+
+    def _ema_merge(self, new_result: SentimentResult) -> SentimentResult:
+        if self._cached_result is None:
+            return new_result
+
+        cfg = get_trading_config().get("llm", {})
+        alpha = float(cfg.get("state_ema_alpha", 0.35))
+        alpha = max(0.0, min(1.0, alpha))
+        prev = self._cached_result
+
+        merged = replace(
+            new_result,
+            sentiment_score=self._blend(prev.sentiment_score, new_result.sentiment_score, alpha),
+            news_importance_score=self._blend(prev.news_importance_score, new_result.news_importance_score, alpha),
+            risk_appetite_score=self._blend(prev.risk_appetite_score, new_result.risk_appetite_score, alpha),
+            usd_macro_score=self._blend(prev.usd_macro_score, new_result.usd_macro_score, alpha),
+            jpy_macro_score=self._blend(prev.jpy_macro_score, new_result.jpy_macro_score, alpha),
+            eur_strength_score=self._blend(prev.eur_strength_score, new_result.eur_strength_score, alpha),
+            gbp_strength_score=self._blend(prev.gbp_strength_score, new_result.gbp_strength_score, alpha),
+            oil_shock_score=self._blend(prev.oil_shock_score, new_result.oil_shock_score, alpha),
+            geopolitical_risk_score=self._blend(prev.geopolitical_risk_score, new_result.geopolitical_risk_score, alpha),
+            unexpected_veto=bool(new_result.unexpected_veto or prev.unexpected_veto),
+            summary=new_result.summary or prev.summary,
+        )
+        return merged
+
+    def update_cached_result(self, new_result: SentimentResult) -> SentimentResult:
+        merged = self._ema_merge(new_result)
+        self._cached_result = merged
+        self._last_call_time = now_utc()
+        return merged
+
+    def get_effective_cached_result(self) -> SentimentResult | None:
+        if self._cached_result is None:
+            return None
+
+        cfg = get_trading_config().get("llm", {})
+        if not bool(cfg.get("state_decay_enabled", True)):
+            return self._cached_result
+
+        age_minutes = max(0.0, elapsed_minutes(self._cached_result.timestamp_utc))
+        max_minutes = float(cfg.get("state_decay_max_minutes", 1440.0))
+        if age_minutes >= max_minutes:
+            decay = 0.0
+        else:
+            half_life = max(1.0, float(cfg.get("state_decay_half_life_minutes", 240.0)))
+            decay = math.pow(0.5, age_minutes / half_life)
+
+        veto_persist = float(cfg.get("state_veto_persist_minutes", 180.0))
+        veto_active = bool(self._cached_result.unexpected_veto and age_minutes <= veto_persist)
+
+        return replace(
+            self._cached_result,
+            sentiment_score=self._cached_result.sentiment_score * decay,
+            news_importance_score=self._cached_result.news_importance_score * decay,
+            risk_appetite_score=self._cached_result.risk_appetite_score * decay,
+            usd_macro_score=self._cached_result.usd_macro_score * decay,
+            jpy_macro_score=self._cached_result.jpy_macro_score * decay,
+            eur_strength_score=self._cached_result.eur_strength_score * decay,
+            gbp_strength_score=self._cached_result.gbp_strength_score * decay,
+            oil_shock_score=self._cached_result.oil_shock_score * decay,
+            geopolitical_risk_score=self._cached_result.geopolitical_risk_score * decay,
+            unexpected_veto=veto_active,
+        )
 
     @property
     def is_low_power(self) -> bool:
@@ -202,6 +273,12 @@ class LLMClient:
             score = default
         return max(0.0, min(1.0, score))
 
+    def _first_available(self, parsed: dict, keys: list[str], default: object = 0.0) -> object:
+        for key in keys:
+            if key in parsed:
+                return parsed[key]
+        return default
+
     def _is_tool_not_supported_error(self, exc: Exception) -> bool:
         msg = str(exc).lower()
         return (
@@ -270,18 +347,59 @@ class LLMClient:
 
         parsed = self._parse_llm_json(text)
 
+        sentiment_raw = self._first_available(
+            parsed,
+            ["sentiment_score", "target_pair_sentiment"],
+            0.0,
+        )
+        usd_macro_raw = self._first_available(
+            parsed,
+            ["usd_macro_score", "usd_strength_score"],
+            0.0,
+        )
+        jpy_macro_raw = self._first_available(
+            parsed,
+            ["jpy_macro_score", "jpy_strength_score"],
+            0.0,
+        )
+        oil_raw = self._first_available(
+            parsed,
+            ["oil_shock_score", "energy_shock_score"],
+            0.0,
+        )
+        news_importance_raw = self._first_available(
+            parsed,
+            ["news_importance_score"],
+            0.0,
+        )
+
         result = SentimentResult(
-            sentiment_score=self._coerce_score(parsed.get("sentiment_score", 0.0)),
+            sentiment_score=self._coerce_score(sentiment_raw),
             unexpected_veto=self._as_bool(parsed.get("unexpected_veto", False)),
             summary=parsed.get("summary", ""),
-            news_importance_score=self._coerce_importance(parsed.get("news_importance_score", 0.0)),
+            news_importance_score=self._coerce_importance(news_importance_raw),
             risk_appetite_score=self._coerce_score(parsed.get("risk_appetite_score", 0.0)),
-            usd_macro_score=self._coerce_score(parsed.get("usd_macro_score", 0.0)),
-            jpy_macro_score=self._coerce_score(parsed.get("jpy_macro_score", 0.0)),
-            oil_shock_score=self._coerce_score(parsed.get("oil_shock_score", 0.0)),
+            usd_macro_score=self._coerce_score(usd_macro_raw),
+            jpy_macro_score=self._coerce_score(jpy_macro_raw),
+            eur_strength_score=self._coerce_score(parsed.get("eur_strength_score", 0.0)),
+            gbp_strength_score=self._coerce_score(parsed.get("gbp_strength_score", 0.0)),
+            oil_shock_score=self._coerce_score(oil_raw),
             geopolitical_risk_score=self._coerce_score(parsed.get("geopolitical_risk_score", 0.0)),
             model_used=model,
         )
+
+        if "news_importance_score" not in parsed:
+            inferred_importance = max(
+                abs(result.sentiment_score),
+                abs(result.risk_appetite_score),
+                abs(result.usd_macro_score),
+                abs(result.jpy_macro_score),
+                abs(result.oil_shock_score),
+                abs(result.geopolitical_risk_score),
+            )
+            if result.unexpected_veto:
+                inferred_importance = max(inferred_importance, 0.9)
+            result.news_importance_score = self._coerce_importance(inferred_importance)
 
         if self._db_conn:
             usage = response.usage

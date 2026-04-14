@@ -16,6 +16,11 @@
     "web_search_enabled": true,
     "web_search_tool_type": "web_search_preview",
     "web_search_context_size": "low",
+    "state_ema_alpha": 0.35,
+    "state_decay_enabled": true,
+    "state_decay_half_life_minutes": 240,
+    "state_decay_max_minutes": 1440,
+    "state_veto_persist_minutes": 180,
     "llm_enabled": true,
     "atr_threshold_multiplier": 1.5,
     "cache_ttl_normal_minutes": 60,
@@ -80,11 +85,17 @@
         "geopolitical_risk_score": 1.0
       }
     },
-    "min_samples_per_pair": 300,
+    "min_samples_per_pair": 180,
     "min_directional_samples": 30,
     "min_cv_accuracy": 0.40,
-    "lookback_days": 90,
-    "directional_class_boost": 1.0,
+    "allow_train_without_wfv": true,
+    "lookback_days": 60,
+    "directional_class_boost": 1.15,
+    "recency_weighting_enabled": true,
+    "recency_half_life_days": 14,
+    "recency_min_weight": 0.4,
+    "wfv_train_days": 21,
+    "wfv_val_days": 7,
     "execution_direction_mode": "model",
     "lgbm_params_per_pair": {
       "USDJPY": {

@@ -212,6 +212,38 @@ def _build_xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
     return X_np, y_np
 
 
+def _build_recency_weights(
+    rows: list[dict],
+    half_life_days: float,
+    min_weight: float,
+) -> np.ndarray:
+    """signal_time を基準に、古いサンプルほど指数減衰で重みを下げる。"""
+    if not rows:
+        return np.empty((0,), dtype=np.float64)
+
+    safe_half_life = max(1.0, float(half_life_days))
+    safe_min_weight = min(1.0, max(0.05, float(min_weight)))
+
+    timestamps: list[datetime] = []
+    for row in rows:
+        ts_raw = row.get("signal_time")
+        if ts_raw:
+            try:
+                timestamps.append(_to_datetime_utc(str(ts_raw)))
+                continue
+            except Exception:
+                pass
+        timestamps.append(datetime(1970, 1, 1, tzinfo=timezone.utc))  # パース失敗 → 最古扱いにして最低重みを付与
+
+    newest = max(timestamps)
+    out = []
+    for ts in timestamps:
+        age_days = max(0.0, (newest - ts).total_seconds() / 86400.0)
+        weight = 0.5 ** (age_days / safe_half_life)
+        out.append(max(safe_min_weight, float(weight)))
+    return np.array(out, dtype=np.float64)
+
+
 def retrain_models_from_db(
     db_conn: sqlite3.Connection,
     model_dir: str,
@@ -224,6 +256,12 @@ def retrain_models_from_db(
     pairs = config["system"]["pairs"]
     min_directional_samples = int(ml_cfg.get("min_directional_samples", 30))
     min_cv_accuracy = float(ml_cfg.get("min_cv_accuracy", 0.40))
+    allow_train_without_wfv = bool(ml_cfg.get("allow_train_without_wfv", True))
+    recency_weighting_enabled = bool(ml_cfg.get("recency_weighting_enabled", True))
+    recency_half_life_days = float(ml_cfg.get("recency_half_life_days", 21))
+    recency_min_weight = float(ml_cfg.get("recency_min_weight", 0.35))
+    wfv_train_days = int(ml_cfg.get("wfv_train_days", 60))
+    wfv_val_days = int(ml_cfg.get("wfv_val_days", 15))
 
     result = {
         "trained_pairs": [],
@@ -239,7 +277,15 @@ def retrain_models_from_db(
             logger.warning(f"Retrain skipped for {pair}: {reason}")
             continue
 
-        X, y = _build_xy(rows)
+        labeled_rows = [r for r in rows if r.get("label") is not None]
+        X, y = _build_xy(labeled_rows)
+        sample_weight = None
+        if recency_weighting_enabled:
+            sample_weight = _build_recency_weights(
+                rows=labeled_rows,
+                half_life_days=recency_half_life_days,
+                min_weight=recency_min_weight,
+            )
 
         class_counts = np.bincount(y, minlength=3)
         up_count = int(class_counts[0])
@@ -255,20 +301,62 @@ def retrain_models_from_db(
         val = walk_forward_validate(
             X,
             y,
+            sample_weight=sample_weight,
             signal_times=[
-                datetime.fromisoformat(r["signal_time"]) for r in rows
+                datetime.fromisoformat(r["signal_time"]) for r in labeled_rows
                 if r.get("signal_time")
             ],
+            train_days=wfv_train_days,
+            val_days=wfv_val_days,
             pair=pair,
         )
+        if int(val.get("n_folds", 0)) == 0:
+            fallback_train_days = max(7, min(14, wfv_train_days))
+            fallback_val_days = max(3, min(5, wfv_val_days))
+            if fallback_train_days != wfv_train_days or fallback_val_days != wfv_val_days:
+                fallback_val = walk_forward_validate(
+                    X,
+                    y,
+                    sample_weight=sample_weight,
+                    signal_times=[
+                        datetime.fromisoformat(r["signal_time"]) for r in labeled_rows
+                        if r.get("signal_time")
+                    ],
+                    train_days=fallback_train_days,
+                    val_days=fallback_val_days,
+                    pair=pair,
+                )
+                if int(fallback_val.get("n_folds", 0)) > 0:
+                    logger.info(
+                        f"WFV fallback applied for {pair}: "
+                        f"train_days={fallback_train_days}, val_days={fallback_val_days}"
+                    )
+                    val = fallback_val
         cv_acc = float(val.get("accuracy", 0.0))
-        if cv_acc < min_cv_accuracy:
+        n_folds = int(val.get("n_folds", 0))
+        if n_folds <= 0:
+            if allow_train_without_wfv:
+                logger.info(
+                    f"WFV unavailable for {pair} (no fold). Continue training with recent-data mode."
+                )
+            else:
+                reason = "wfv_unavailable"
+                result["skipped_pairs"][pair] = reason
+                logger.warning(f"Retrain skipped for {pair}: {reason}")
+                continue
+        elif cv_acc < min_cv_accuracy:
             logger.warning(
                 f"Low CV accuracy for {pair}: {cv_acc:.4f}<{min_cv_accuracy:.4f}. "
                 f"Continue training (ML-priority mode)."
             )
 
-        train_model(X, y, pair=pair, model_dir=model_dir)
+        train_model(
+            X,
+            y,
+            pair=pair,
+            model_dir=model_dir,
+            sample_weight=sample_weight,
+        )
         save_model_metrics(
             pair=pair,
             model_dir=model_dir,
@@ -276,6 +364,7 @@ def retrain_models_from_db(
                 "accuracy": float(val.get("accuracy", 0.0)),
                 "balanced_accuracy": float(val.get("balanced_accuracy", 0.0)),
                 "majority_baseline": float(val.get("majority_baseline", 0.0)),
+                "n_folds": int(val.get("n_folds", 0)),
                 "samples": len(rows),
                 "source": "weekly_retraining",
             },
@@ -296,12 +385,13 @@ def run_weekly_retraining(db_conn: sqlite3.Connection) -> dict:
     horizon_minutes = int(config.get("ml", {}).get("label_horizon_minutes", 240))
     horizon_per_pair: dict = config.get("ml", {}).get("label_horizon_minutes_per_pair", {})
     min_samples_per_pair = int(config.get("ml", {}).get("min_samples_per_pair", 300))
+    lookback_days = int(config.get("ml", {}).get("lookback_days", 90))
 
     labeling = label_unlabeled_samples(db_conn, horizon_minutes=horizon_minutes, horizon_per_pair=horizon_per_pair)
     retrain = retrain_models_from_db(
         db_conn,
         model_dir=settings.model_dir,
-        lookback_days=90,
+        lookback_days=lookback_days,
         min_samples_per_pair=min_samples_per_pair,
     )
 
